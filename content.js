@@ -148,6 +148,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  if (message.action === "probePlatformSubtitle") {
+    // 站点专属字幕探测：优先从页面拿到平台原生字幕所需的关键信息。
+    // YouTube 的 captionTracks 需在 MAIN world 读取（由 background 用
+    // executeScript 处理）；这里主要处理 B站 cid/bvid 提取。
+    const info = extractPlatformSubtitleMeta();
+    sendResponse(info);
+    return false;
+  }
+
+  if (message.action === "fetchBilibiliSubtitleMeta") {
+    // 从 B站页面 window.__INITIAL_STATE__ 提取 cid 与 bvid，供 background
+    // 调用 B站字幕接口（返回 body 数组，不消耗任何 Supadata 额度）。
+    const meta = extractBilibiliCid();
+    sendResponse(meta);
+    return false;
+  }
+
   if (message.action === "seekTo") {
     // Jump the video to a specific timestamp
     debugLog("[YouTube Digest Content] Seeking to:", message.seconds);
@@ -730,6 +747,61 @@ function extractVideoInfo() {
     duration: videoElement?.duration || 0,
     description: descriptionElement?.textContent?.trim() || "",
   };
+}
+
+/**
+ * 站点专属字幕元信息提取。
+ * 返回当前站点、URL、以及用于获取平台原生字幕的关键标识。background 据此
+ * 决定走哪条免费字幕通道，尽量不消耗 Supadata 额度。
+ */
+function extractPlatformSubtitleMeta() {
+  const url = window.location.href;
+  const site = YTD_SUBTITLE_SOURCES?.detectSite
+    ? YTD_SUBTITLE_SOURCES.detectSite(url)
+    : "generic";
+  const result = { site, url, videoId: null, bilibili: null };
+
+  if (site === "bilibili") {
+    result.videoId = YTD_SUBTITLE_SOURCES.extractVideoId(url);
+    result.bilibili = extractBilibiliCid();
+  } else if (site === "youtube") {
+    result.videoId = YTD_SUBTITLE_SOURCES.extractVideoId(url);
+  }
+  return result;
+}
+
+/**
+ * 从 B站页面全局状态提取 cid（视频分 P 编号）与 bvid。
+ * B站字幕接口依赖 cid；拿到后可请求 /x/player/wbi/v2 获取字幕 URL，
+ * 全程不消耗 Supadata 额度。
+ * 返回 { cid:number|null, bvid:string|null, ok:boolean }。
+ */
+function extractBilibiliCid() {
+  try {
+    // 优先读 __INITIAL_STATE__（B站播放页注入的全局数据）
+    const state = window.__INITIAL_STATE__;
+    if (state) {
+      const videoData =
+        state.videoData || state.videoInfo || state.aidAndCidMap || null;
+      const aid =
+        state.aid || videoData?.aid || state.videoData?.aid || null;
+      const bvid =
+        state.bvid || videoData?.bvid || state.videoData?.bvid || null;
+      // cid 优先取当前分 P
+      const cid =
+        state.cid ||
+        videoData?.cid ||
+        state.videoData?.cid ||
+        (Array.isArray(state.pages) && state.pages[0]?.cid) ||
+        null;
+      return { cid: cid ? Number(cid) : null, bvid: bvid || null, ok: !!cid };
+    }
+    // 兜底：从 DOM meta 或地址栏解析
+    const m = window.location.pathname.match(/\/video\/(BV[0-9A-Za-z]+)/);
+    return { cid: null, bvid: m ? m[1] : null, ok: false };
+  } catch (_e) {
+    return { cid: null, bvid: null, ok: false };
+  }
 }
 
 // ============================================================

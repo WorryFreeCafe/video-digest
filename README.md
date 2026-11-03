@@ -118,7 +118,41 @@ Keys and settings are stored in Chrome's local extension storage on your device.
 
 Shorts, live streams, private or access-restricted videos, and videos without an available native transcript may not work. Firefox, Safari, mobile browsers, and other Chromium browsers are not currently tested or supported.
 
-YouTube Digest forces Supadata's `mode=native`. It does not request AI-generated transcripts or perform local audio transcription when native captions are unavailable.
+## Subtitle source routing (three scenarios)
+
+YouTube Digest now routes subtitle retrieval by availability, so it does not
+blindly spend a Supadata credit on every video:
+
+1. **Platform-native subtitles (free, no Supadata).** The extension first probes
+   for native captions on the current page - YouTube `captionTracks`, Bilibili's
+   free subtitle API, or generic HTML5 `video.textTracks`. If found, the text is
+   used directly for the digest, spending **zero** Supadata credits.
+
+2. **No native subtitle → local Whisper transcription (optional).** If no
+   platform caption exists and you enable **Local Whisper** in Settings, the
+   extension captures the currently-playing audio window (~2 minutes, via
+   `captureStream`) and sends it to a local [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
+   service (`whisper/whisper_server.py`). Transcription happens on your machine
+   and does not touch Supadata.
+
+3. **Manual Supadata fallback.** Supadata is no longer auto-called. When neither
+   a native caption nor an enabled Whisper fallback is available, the side panel
+   shows a manual **Use Supadata (fallback)** action so you can spend a credit
+   only when you choose to.
+
+Supadata remains available, but it is opt-in rather than the default path.
+
+### Run the local Whisper server (optional)
+
+```bash
+pip install -r whisper/requirements.txt
+python whisper/whisper_server.py --model small --port 8000
+```
+
+Then in Settings, enable **Local Whisper** and keep the default server URL
+`http://127.0.0.1:8000`. Note the same limitation as always: DRM / encrypted
+streams and videos that have not started playing cannot be captured, so this
+fallback only helps for playable, unencrypted videos.
 
 ## Supadata free tier and request costs
 
@@ -201,17 +235,24 @@ There is no YouTube Digest account system, advertising, analytics, or telemetry.
 
 ### YouTube Digest asks for setup
 
-- Open **Settings** and save both a Supadata key and a DeepSeek key.
+- Open **Settings** and save a DeepSeek key. A Supadata key is only required if
+  you want the manual Supadata fallback; with platform-native subtitles or an
+  enabled local Whisper fallback, Supadata is optional.
 - This published version uses the fixed DeepSeek V4 Flash endpoint and model. There are no Base URL or Model fields to configure.
 - If Settings says a legacy custom provider was removed, enter a DeepSeek key. The old AI key was cleared so it could not be reused with the wrong service.
 
 ### No transcript is found
 
 - Confirm the video is public and has native captions.
-- Check your Supadata key, remaining credits, rate limit, and account status.
-- Remember that unavailable native lookups and manual retries may still consume credits.
+- If you did not enable **Local Whisper** in Settings, the extension does not
+  transcribe audio on its own. Enable it (and start `whisper/whisper_server.py`)
+  to get an audio-transcription fallback.
+- When you do use the manual Supadata fallback, remember that unavailable native
+  lookups and manual retries may still consume credits.
 
-YouTube Digest will not fall back to generated transcription.
+The extension will not auto-spend Supadata credits when a native caption is
+missing; it either uses a platform caption, your local Whisper fallback, or
+asks you to choose before any paid lookup.
 
 ### AI requests fail
 

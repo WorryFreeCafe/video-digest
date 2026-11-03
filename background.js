@@ -13,7 +13,7 @@
 
 // Import safe defaults and validation helpers. Secret keys live in
 // chrome.storage.local and are never part of the extension source.
-importScripts("settings.js");
+importScripts("settings.js", "subtitle-sources.js");
 
 const DEBUG = false;
 const AI_PROVIDER_IDLE_TIMEOUT_MS = 50_000;
@@ -349,6 +349,31 @@ chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
  */
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // We need to return true to indicate we'll respond asynchronously
+  if (message.action === "fetchTranscriptSmart") {
+    // 字幕预检编排：优先平台原生字幕（免费）→ Whisper 音频转录 → 提示兜底。
+    // 不再默认调用 Supadata，避免无字幕视频也消耗额度。
+    handleFetchTranscriptSmart(message.videoId, message.tabId)
+      .then(sendResponse)
+      .catch((err) => sendResponse({ error: err.message, source: "smart" }));
+    return true;
+  }
+
+  if (message.action === "fetchTranscriptSupadata") {
+    // 手动兜底：仅在用户明确点击"使用 Supadata"时调用。
+    handleFetchTranscriptSupadata(message.videoId)
+      .then(sendResponse)
+      .catch((err) => sendResponse({ error: err.message }));
+    return true;
+  }
+
+  if (message.action === "captureAudioTranscribe") {
+    // 手动触发：捕获当前播放音频并交给本地 Whisper 转录。
+    handleCaptureAudioTranscribe(message.tabId, message.options)
+      .then(sendResponse)
+      .catch((err) => sendResponse({ error: err.message }));
+    return true;
+  }
+
   if (message.action === "fetchTranscript") {
     handleFetchTranscript(message.videoId)
       .then(sendResponse)
@@ -604,12 +629,18 @@ async function getPlayerVideoDetails(tabId) {
         try {
           const player = document.getElementById("movie_player");
           const details = player?.getPlayerResponse?.()?.videoDetails;
+          const caps = player?.getPlayerResponse?.()?.captions;
+          const tracks = caps?.playerCaptionsTracklistRenderer?.captionTracks;
+          const captionTracks = Array.isArray(tracks)
+            ? tracks.map((t) => ({ baseUrl: t.baseUrl || "", lang: t.languageCode || "" }))
+            : [];
           if (!details) return null;
           return {
             title: details.title || "",
             channelName: details.author || "",
             description: details.shortDescription || "",
             duration: Number(details.lengthSeconds) || 0,
+            captionTracks,
           };
         } catch (e) {
           return null;
@@ -626,6 +657,267 @@ async function getPlayerVideoDetails(tabId) {
 // ============================================================
 // TRANSCRIPT FETCHING VIA SUPADATA API
 // ============================================================
+
+/**
+ * 字幕预检编排：先尝试免费获取平台原生字幕，再尝试本地 Whisper 音频转录，
+ * 最后才提示用户可手动选择 Supadata 兜底。目的是避免无字幕视频也白白消耗
+ * Supadata 额度。
+ *
+ * @param {string} videoId - 平台视频 ID（YouTube 或 B站标识）
+ * @param {number} [tabId] - 当前标签页 ID，用于向 content script 探测
+ * @returns {Object}
+ */
+async function handleFetchTranscriptSmart(videoId, tabId) {
+  const settings = await getSettings();
+
+  // 1) 平台原生字幕预检（免费，不耗 Supadata）
+  const platform = await probePlatformSubtitle(videoId, tabId, settings);
+  if (platform && platform.success && platform.transcript?.length) {
+    return YTD_SUBTITLE_SOURCES.sourceResult("platform", {
+      transcript: platform.transcript,
+      transcriptText: platform.transcriptText,
+      transcriptTextTimestamped: platform.transcriptTextTimestamped,
+      language: platform.language || null,
+      note: "来自平台原生字幕，未使用 Supadata。",
+    });
+  }
+
+  // 2) 本地 Whisper 音频转录兜底（若用户已启用）
+  if (settings.whisperEnabled && tabId) {
+    const whisper = await handleCaptureAudioTranscribe(tabId, settings, {
+      silent: true,
+    });
+    if (whisper && whisper.success && whisper.transcriptText) {
+      return YTD_SUBTITLE_SOURCES.sourceResult("whisper", {
+        transcript: whisper.transcript,
+        transcriptText: whisper.transcriptText,
+        transcriptTextTimestamped: whisper.transcriptTextTimestamped,
+        language: null,
+        note: "无原生字幕，已通过本地 Whisper 转录。",
+      });
+    }
+    return YTD_SUBTITLE_SOURCES.sourceResult("whisper", {
+      success: false,
+      error: whisper?.error || "WHISPER_FAILED",
+      message:
+        whisper?.message ||
+        "无原生字幕，且本地 Whisper 转录失败。可尝试 Supadata 兜底。",
+      canFallbackToSupadata: true,
+    });
+  }
+
+  // 3) 无字幕、未启用 Whisper：提示可手动兜底
+  return YTD_SUBTITLE_SOURCES.sourceResult("none", {
+    success: false,
+    error: "NO_TRANSCRIPT",
+    message:
+      "该视频未检测到原生字幕，且未启用本地 Whisper。可手动选择 Supadata 兜底，或先在设置中启用 Whisper。",
+    canFallbackToSupadata: true,
+    canEnableWhisper: true,
+  });
+}
+
+/**
+ * 探测平台原生字幕（免费通道），不消耗 Supadata 额度。
+ * 通过 content script 收集页面信息：
+ *   - YouTube：页面脚本可读 captionTracks（由 getPlayerVideoDetails 顺带处理）
+ *   - B站：读取 cid，再调 B站字幕接口
+ *   - 通用 html：探测 video.textTracks
+ * @returns {Object|null}
+ */
+async function probePlatformSubtitle(videoId, tabId, settings) {
+  if (!tabId) return null;
+
+  // 取得当前标签页的站点信息
+  let pageUrl = "";
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    pageUrl = tab.url || "";
+  } catch (_e) {
+    return null;
+  }
+  const site = YTD_SUBTITLE_SOURCES.detectSite(pageUrl);
+
+  // B站：走免费字幕接口（不需要 Supadata）
+  if (site === "bilibili") {
+    return await fetchBilibiliSubtitle(tabId, videoId);
+  }
+
+  // 通用 html video：探测原生 textTracks
+  if (site === "generic") {
+    try {
+      const probe = await chrome.tabs.sendMessage(tabId, {
+        action: "probeGenericSubtitle",
+      });
+      if (probe && probe.found && probe.chunks?.length) {
+        return YTD_SUBTITLE_SOURCES.buildTranscriptFromChunks(probe.chunks);
+      }
+      return null;
+    } catch (_e) {
+      return null;
+    }
+  }
+
+  // YouTube：优先尝试页面 captionTracks（免费），失败则交由调用方决定
+  // 是否走 Supadata 兜底。这里尝试从 player 取字幕轨道。
+  try {
+    const player = await getPlayerVideoDetails(tabId);
+    if (player && player.captionTracks && player.captionTracks.length > 0) {
+      const first = player.captionTracks[0];
+      if (first && first.baseUrl) {
+        const resp = await fetch(first.baseUrl);
+        const xml = await resp.text();
+        const parsed = parseYoutubeCaptionXml(xml);
+        if (parsed.length) {
+          return YTD_SUBTITLE_SOURCES.buildTranscriptFromChunks(parsed);
+        }
+      }
+    }
+    return null;
+  } catch (_e) {
+    return null;
+  }
+}
+
+/**
+ * 从 B站字幕接口获取字幕（全程免费，不消耗 Supadata 额度）。
+ * 需要 cid；若页面未暴露 cid，则返回 null 由调用方兜底。
+ */
+async function fetchBilibiliSubtitle(tabId, videoId) {
+  let meta;
+  try {
+    meta = await chrome.tabs.sendMessage(tabId, {
+      action: "fetchBilibiliSubtitleMeta",
+    });
+  } catch (_e) {
+    return null;
+  }
+  const cid = meta?.cid;
+  const bvid = meta?.bvid || videoId;
+  if (!cid || !bvid) return null;
+
+  try {
+    // B站播放信息接口（无需鉴权即可拿到字幕地址）
+    const playerUrl = new URL(
+      "https://api.bilibili.com/x/player/wbi/v2",
+    );
+    playerUrl.searchParams.set("bvid", bvid);
+    playerUrl.searchParams.set("cid", cid);
+    const infoResp = await fetch(playerUrl.toString(), {
+      credentials: "omit",
+    });
+    const info = await infoResp.json().catch(() => ({}));
+    const subs = info?.data?.subtitle?.subtitles;
+    if (!subs || !Array.isArray(subs) || subs.length === 0) return null;
+
+    // 取第一条字幕（通常为中文），fetch 其 JSON
+    const subUrl = subs[0].subtitle_url;
+    if (!subUrl) return null;
+    const fullUrl = subUrl.startsWith("//")
+      ? `https:${subUrl}`
+      : subUrl.startsWith("http")
+        ? subUrl
+        : `https://${subUrl}`;
+    const subResp = await fetch(fullUrl, { credentials: "omit" });
+    const subData = await subResp.json().catch(() => ({}));
+    const body = subData?.body;
+    if (!Array.isArray(body) || body.length === 0) return null;
+
+    const chunks = body.map((item) => ({
+      start: Number(item.from) || 0,
+      text: item.content || "",
+      language: item.lan || subs[0].lan || null,
+    }));
+    const built = YTD_SUBTITLE_SOURCES.buildTranscriptFromChunks(chunks);
+    built.language = subs[0].lan || null;
+    return built;
+  } catch (_e) {
+    return null;
+  }
+}
+
+/**
+ * 解析 YouTube timedtext 字幕 XML 为 chunks。
+ * 格式：<transcript><text start="..." dur="...">...</text>...</transcript>
+ */
+function parseYoutubeCaptionXml(xml) {
+  const chunks = [];
+  const textRegex = /<text[^>]*start="([0-9.]+)"[^>]*>([\s\S]*?)<\/text>/g;
+  let m;
+  while ((m = textRegex.exec(xml)) !== null) {
+    const start = parseFloat(m[1]);
+    const raw = m[2]
+      .replace(/<[^>]+>/g, "")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&#39;/g, "'")
+      .replace(/&quot;/g, '"');
+    if (raw.trim()) chunks.push({ start: start || 0, text: raw.trim() });
+  }
+  return chunks;
+}
+
+/**
+ * 捕获当前播放音频并交给本地 Whisper 转录。
+ * @param {number} tabId
+ * @param {Object} settings
+ * @param {Object} [opts]
+ * @returns {Object}
+ */
+async function handleCaptureAudioTranscribe(tabId, settings = null, opts = {}) {
+  const cfg =
+    settings ||
+    (await getSettings());
+  if (!cfg.whisperEnabled) {
+    return {
+      success: false,
+      error: "WHISPER_DISABLED",
+      message: "本地 Whisper 未启用。请在设置中开启。",
+    };
+  }
+  if (!tabId) {
+    return {
+      success: false,
+      error: "NO_TAB",
+      message: "缺少标签页信息，无法捕获音频。",
+    };
+  }
+  try {
+    const probe = await chrome.tabs.sendMessage(tabId, {
+      action: "captureAudio",
+      options: {
+        seconds: 120,
+        whisperUrl: cfg.whisperServerUrl,
+        model: cfg.whisperModel,
+      },
+    });
+    if (!probe || !probe.success || !probe.text) {
+      return {
+        success: false,
+        error: probe?.error || "CAPTURE_FAILED",
+        message: probe?.message || "音频捕获/转录失败。",
+      };
+    }
+    const built = YTD_SUBTITLE_SOURCES.buildTranscriptFromPlainText(probe.text);
+    built.note = "通过本地 Whisper 转录";
+    return built;
+  } catch (e) {
+    return {
+      success: false,
+      error: "CAPTURE_ERROR",
+      message: `音频捕获出错：${e.message}`,
+    };
+  }
+}
+
+/**
+ * 手动兜底：使用 Supadata 获取平台字幕（消耗额度）。
+ * 仅当用户明确选择时调用。
+ */
+async function handleFetchTranscriptSupadata(videoId) {
+  return handleFetchTranscript(videoId);
+}
 
 /**
  * Fetches the transcript for a YouTube video using Supadata API.

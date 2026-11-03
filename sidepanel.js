@@ -21,6 +21,7 @@ let currentTranscript = null;
 let currentTranscriptText = null; // Plain text (for display/export)
 let currentTranscriptTimestamped = null; // With timestamps for AI analysis
 let currentTranscriptLanguage = null;
+let currentTranscriptSource = null; // "platform" | "whisper" | "supadata" | "none"
 let currentVideoTitle = "";
 let currentChannelName = "";
 let currentVideoDescription = "";
@@ -524,7 +525,7 @@ async function checkCurrentTab() {
         currentVideoDuration = 0;
       }
 
-      startDigest(videoId, tab.url);
+      startDigest(videoId, tab.url, tab.id);
     } else {
       showState("welcome");
     }
@@ -563,7 +564,7 @@ function extractVideoId(url) {
 // DIGEST PIPELINE
 // ============================================================
 
-async function startDigest(videoId, videoUrl) {
+async function startDigest(videoId, videoUrl, tabId) {
   // Check if we already have this video loaded in memory
   if (videoId === currentVideoId && currentAnalysis) {
     showState("results");
@@ -662,14 +663,30 @@ async function startDigest(videoId, videoUrl) {
   }
 
   showState("loading");
-  updateLoading("Fetching transcript", "");
+  updateLoading("Detecting subtitle source", "");
 
+  // 字幕预检编排：优先平台原生字幕（免费）→ Whisper → 提示兜底。
+  // 默认不再自动调用 Supadata，避免无字幕视频白白消耗额度。
   const transcriptResult = await chrome.runtime.sendMessage({
-    action: "fetchTranscript",
+    action: "fetchTranscriptSmart",
     videoId: videoId,
+    tabId: tabId || youtubeTabId,
   });
 
   if (!transcriptResult.success) {
+    currentTranscriptSource = transcriptResult.source || "none";
+
+    if (transcriptResult.source === "whisper") {
+      // 无原生字幕且 Whisper 失败：给出可操作提示
+      showWhisperFallbackError(transcriptResult);
+      return;
+    }
+
+    if (transcriptResult.error === "NO_TRANSCRIPT") {
+      showSubtitleFallbackError(transcriptResult);
+      return;
+    }
+
     if (transcriptResult.error === "NO_SUPADATA_KEY") {
       showError(
         "API key missing",
@@ -688,6 +705,7 @@ async function startDigest(videoId, videoUrl) {
   currentTranscriptText = transcriptResult.transcriptText;
   currentTranscriptTimestamped = transcriptResult.transcriptTextTimestamped;
   currentTranscriptLanguage = transcriptResult.language || null;
+  currentTranscriptSource = transcriptResult.source || "platform";
 
   // Render transcript immediately (no LLM needed)
   renderTranscript();
@@ -1415,6 +1433,75 @@ function showError(title, message) {
   document.getElementById("errorTitle").textContent = title;
   document.getElementById("errorMessage").textContent = message;
   document.getElementById("errorBtn").textContent = "Try Again";
+}
+
+/**
+ * 无原生字幕时的提示：给出"使用 Supadata 兜底"和"开启 Whisper"两个可选操作。
+ */
+function showSubtitleFallbackError(result) {
+  showState("error");
+  document.getElementById("errorTitle").textContent =
+    "No native subtitle found";
+  document.getElementById("errorMessage").textContent =
+    result.message ||
+    "该视频未检测到平台原生字幕。你可以选择：使用 Supadata 获取，或在设置中启用本地 Whisper 转录。";
+  const btn = document.getElementById("errorBtn");
+  btn.textContent = "Use Supadata (fallback)";
+  errorAction = async () => {
+    const r = await chrome.runtime.sendMessage({
+      action: "fetchTranscriptSupadata",
+      videoId: currentVideoId,
+    });
+    applyTranscriptResult(r);
+  };
+}
+
+/**
+ * 无字幕且 Whisper 转录失败时的提示。
+ */
+function showWhisperFallbackError(result) {
+  showState("error");
+  document.getElementById("errorTitle").textContent =
+    "Subtitle unavailable";
+  document.getElementById("errorMessage").textContent =
+    result.message || "字幕获取失败。请确认视频已播放、本地 Whisper 服务已启动。";
+  const btn = document.getElementById("errorBtn");
+  btn.textContent = "Try Whisper again";
+  errorAction = async () => {
+    const r = await chrome.runtime.sendMessage({
+      action: "captureAudioTranscribe",
+      tabId: youtubeTabId,
+      options: {},
+    });
+    applyTranscriptResult(r);
+  };
+}
+
+/**
+ * 将字幕获取结果统一应用到面板状态（供兜底/重试共用）。
+ */
+async function applyTranscriptResult(transcriptResult) {
+  if (!transcriptResult || !transcriptResult.success) {
+    showError(
+      "No transcript found",
+      transcriptResult?.message || transcriptResult?.error,
+    );
+    return;
+  }
+  currentTranscript = transcriptResult.transcript;
+  currentTranscriptText = transcriptResult.transcriptText;
+  currentTranscriptTimestamped = transcriptResult.transcriptTextTimestamped;
+  currentTranscriptLanguage = transcriptResult.language || null;
+  currentTranscriptSource = transcriptResult.source || "supadata";
+
+  renderTranscript();
+  showState("results");
+  document.getElementById("tabsNav").style.display = "flex";
+  restorePendingTranscriptViewState(currentVideoId);
+  loadNotes(currentVideoId);
+  setupExplainFeature();
+  if (currentTranscriptMode !== "original") translateTranscript();
+  await saveToCache(currentVideoId);
 }
 
 function showConfigError(configStatus) {

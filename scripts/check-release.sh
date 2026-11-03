@@ -29,6 +29,8 @@ public_allowlist=(
   "background.js"
   "settings.js"
   "content.js"
+  "subtitle-sources.js"
+  "generic-video-probe.js"
   "sidepanel.html"
   "sidepanel.css"
   "sidepanel.js"

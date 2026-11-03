@@ -12,6 +12,10 @@ var YTD_SETTINGS = (() => {
     aiBaseUrl: "https://api.deepseek.com",
     aiModel: "deepseek-v4-flash",
     supadataApiKey: "",
+    // 本地 Whisper 转录服务（faster-whisper FastAPI），用于无原生字幕时兜底。
+    whisperEnabled: false,
+    whisperServerUrl: "http://127.0.0.1:8000",
+    whisperModel: "small",
   });
 
   function isLegacyCustom(input) {
@@ -32,6 +36,19 @@ var YTD_SETTINGS = (() => {
         typeof input.supadataApiKey === "string"
           ? input.supadataApiKey.trim()
           : "",
+      whisperEnabled:
+        typeof input.whisperEnabled === "boolean"
+          ? input.whisperEnabled
+          : DEFAULTS.whisperEnabled,
+      whisperServerUrl:
+        typeof input.whisperServerUrl === "string" &&
+        input.whisperServerUrl.trim()
+          ? input.whisperServerUrl.trim().replace(/\/+$/, "")
+          : DEFAULTS.whisperServerUrl,
+      whisperModel:
+        typeof input.whisperModel === "string" && input.whisperModel.trim()
+          ? input.whisperModel.trim()
+          : DEFAULTS.whisperModel,
     };
   }
 

@@ -120,7 +120,26 @@ API Key 和设置保存在你设备上的 Chrome 扩展本地存储中。发布�
 
 Shorts、直播、私密视频、受访问限制的视频，以及没有原生字幕的视频可能无法使用。目前没有测试 Firefox、Safari、移动浏览器或其他 Chromium 浏览器。
 
-YouTube Digest 强制使用 Supadata 的 `mode=native`，不会在没有原生字幕时请求 AI 生成转录，也不会在本地转录音频。
+## 字幕来源路由（三种场景）
+
+YouTube Digest 现在按可用性路由字幕获取，不再每个视频都盲目消耗一次 Supadata：
+
+1. **平台原生字幕（免费，不耗 Supadata）**：扩展会先在当前页面探测原生字幕，例如 YouTube 的 `captionTracks`、B 站免费字幕接口、或通用 HTML5 `video.textTracks`。找到就直接用于摘要，**0 消耗** Supadata。
+
+2. **无原生字幕 → 本地 Whisper 转录（可选）**：如果没有平台字幕、且你在设置里开启了**本地 Whisper**，扩展会通过 `captureStream` 捕获当前正在播放的音频窗口（约 2 分钟），发送到本地 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) 服务（`whisper/whisper_server.py`）转写。转录在你的电脑上进行，不经过 Supadata。
+
+3. **手动 Supadata 兜底**：Supadata 不再被自动调用。当既没有原生字幕、也没启用 Whisper 兜底时，侧边栏会显示手动**使用 Supadata（兜底）**按钮，只有你选择时才会消耗额度。
+
+Supadata 仍然可用，但现在是可选路径，而不是默认路径。
+
+### 运行本地 Whisper 服务（可选）
+
+```bash
+pip install -r whisper/requirements.txt
+python whisper/whisper_server.py --model small --port 8000
+```
+
+然后在设置中开启**本地 Whisper**，保持默认服务地址 `http://127.0.0.1:8000`。和以前一样的限制：DRM / 加密流、以及尚未开始播放的视频无法捕获音频，所以该兜底只对可播放、未加密的视频有效。
 
 ## Supadata 免费额度和请求成本
 
@@ -203,17 +222,17 @@ YouTube Digest 没有账号系统、广告、分析统计或行为追踪。Supad
 
 ### YouTube Digest 提示需要设置
 
-- 打开 **Settings**，保存 Supadata Key 和 DeepSeek Key。
+- 打开 **Settings**，保存 DeepSeek Key。Supadata Key 只有在你想使用手动 Supadata 兜底时才需要；使用平台原生字幕或开启本地 Whisper 兜底时，Supadata 是可选的。
 - 发布版本固定使用 DeepSeek V4 Flash，没有需要填写的 Base URL 或 Model 字段。
 - 如果设置提示旧的自定义服务已移除，请重新填写 DeepSeek Key。旧 AI Key 已安全清除，避免被错误用于 DeepSeek。
 
 ### 找不到字幕
 
 - 确认视频是公开的，并且有原生字幕。
-- 检查 Supadata Key、剩余额度、限速和账号状态。
-- 没有字幕的查询和手动重试也可能消耗额度。
+- 如果你没有在设置中开启**本地 Whisper**，扩展不会自行转录音频。开启它（并启动 `whisper/whisper_server.py`）即可获得音频转录兜底。
+- 使用手动 Supadata 兜底时，请注意：没有字幕的查询和手动重试也可能消耗额度。
 
-YouTube Digest 不会自动改用 AI 生成字幕。
+缺少原生字幕时，扩展不会自动消耗 Supadata 额度；它会使用平台字幕、你的本地 Whisper 兜底，或先询问你再决定是否进行付费查询。
 
 ### AI 请求失败
 

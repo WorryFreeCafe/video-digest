@@ -74,6 +74,49 @@
         </section>
 
         <section class="card">
+          <h2 data-i18n="whisperProvider">Local Whisper (fallback)</h2>
+          <label for="whisperEnabled">
+            <input
+              id="whisperEnabled"
+              name="whisperEnabled"
+              type="checkbox"
+            />
+            <span data-i18n="whisperEnabledLabel"
+              >Enable local Whisper transcription when no native subtitle exists</span
+            >
+          </label>
+          <label for="whisperServerUrl" data-i18n="whisperServerUrlLabel"
+            >Whisper server URL</label
+          >
+          <input
+            id="whisperServerUrl"
+            name="whisperServerUrl"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="http://127.0.0.1:8000"
+          />
+          <label for="whisperModel" data-i18n="whisperModelLabel"
+            >Whisper model</label
+          >
+          <input
+            id="whisperModel"
+            name="whisperModel"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="small"
+          />
+          <p class="help">
+            <span data-i18n="whisperHelp"
+              >Runs locally via whisper_server.py (faster-whisper FastAPI).
+              Only captures the currently-playing audio window (~2 min). DRM /
+              encrypted streams cannot be captured.</span
+            >
+          </p>
+        </section>
+
+        <section class="card">
           <h2 data-i18n="aiProvider">AI provider</h2>
           <div
             class="provider-summary"

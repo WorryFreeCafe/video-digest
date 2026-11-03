@@ -16,6 +16,13 @@ const YTD_OPTIONS = (() => {
       supadataLink: "Create a Supadata account and key",
       supadataHelpSuffix:
         ". Supadata generates the key during onboarding.",
+      whisperProvider: "Local Whisper (fallback)",
+      whisperEnabledLabel:
+        "Enable local Whisper transcription when no native subtitle exists",
+      whisperServerUrlLabel: "Whisper server URL",
+      whisperModelLabel: "Whisper model",
+      whisperHelp:
+        "Runs locally via whisper_server.py (faster-whisper FastAPI). Only captures the currently-playing audio window (~2 min). DRM / encrypted streams cannot be captured.",
       aiProvider: "AI provider",
       providerSummaryLabel: "Supported AI provider",
       providerBadge: "Supported in this version",
@@ -85,6 +92,12 @@ const YTD_OPTIONS = (() => {
       supadataHelp: "用于获取带时间戳的 YouTube 字幕。",
       supadataLink: "创建 Supadata 账号并获取密钥",
       supadataHelpSuffix: "。Supadata 会在引导流程中生成密钥。",
+      whisperProvider: "本地 Whisper（兜底）",
+      whisperEnabledLabel: "无原生字幕时启用本地 Whisper 转录",
+      whisperServerUrlLabel: "Whisper 服务地址",
+      whisperModelLabel: "Whisper 模型",
+      whisperHelp:
+        "通过 whisper_server.py（faster-whisper FastAPI）在本机运行。仅能捕获当前正在播放的音频窗口（约 2 分钟）。DRM / 加密流无法捕获。",
       aiProvider: "AI 服务",
       providerSummaryLabel: "支持的 AI 服务",
       providerBadge: "当前版本支持",
@@ -350,6 +363,9 @@ const YTD_OPTIONS = (() => {
     const form = doc.getElementById("settingsForm");
     const aiApiKeyInput = doc.getElementById("aiApiKey");
     const supadataApiKeyInput = doc.getElementById("supadataApiKey");
+    const whisperEnabledInput = doc.getElementById("whisperEnabled");
+    const whisperServerUrlInput = doc.getElementById("whisperServerUrl");
+    const whisperModelInput = doc.getElementById("whisperModel");
     const customizationPrompt = doc.getElementById("customizationPrompt");
     const copyCustomizationPromptBtn = doc.getElementById(
       "copyCustomizationPromptBtn",
@@ -422,6 +438,15 @@ const YTD_OPTIONS = (() => {
 
         aiApiKeyInput.value = settings.aiApiKey;
         supadataApiKeyInput.value = settings.supadataApiKey;
+        if (whisperEnabledInput) {
+          whisperEnabledInput.checked = !!settings.whisperEnabled;
+        }
+        if (whisperServerUrlInput) {
+          whisperServerUrlInput.value = settings.whisperServerUrl;
+        }
+        if (whisperModelInput) {
+          whisperModelInput.value = settings.whisperModel;
+        }
         if (migration.migrated) {
           await storage.set({ [settingsApi.STORAGE_KEY]: settings });
           setStatus(saveStatus, "migrationWarning");
@@ -447,14 +472,25 @@ const YTD_OPTIONS = (() => {
       const settings = settingsApi.normalize({
         aiApiKey: aiApiKeyInput.value,
         supadataApiKey: supadataApiKeyInput.value,
+        whisperEnabled: whisperEnabledInput
+          ? whisperEnabledInput.checked
+          : false,
+        whisperServerUrl: whisperServerUrlInput
+          ? whisperServerUrlInput.value
+          : settingsApi.DEFAULTS.whisperServerUrl,
+        whisperModel: whisperModelInput
+          ? whisperModelInput.value
+          : settingsApi.DEFAULTS.whisperModel,
       });
 
-      if (!settings.supadataApiKey) {
-        setStatus(saveStatus, "addSupadataKey");
-        return;
-      }
       if (!settings.aiApiKey) {
         setStatus(saveStatus, "addDeepseekKey");
+        return;
+      }
+      // Supadata key 不再强制：启用本地 Whisper 或仅需平台原生字幕时，
+      // 即使没有 Supadata key 也能工作。只有明确需要 Supadata 兜底时才必须填写。
+      if (!settings.supadataApiKey && !settings.whisperEnabled) {
+        setStatus(saveStatus, "addSupadataKey");
         return;
       }
 
