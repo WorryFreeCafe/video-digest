@@ -859,16 +859,20 @@ function parseYoutubeCaptionXml(xml) {
 }
 
 /**
- * 捕获当前播放音频并交给本地 Whisper 转录。
+ * 捕获当前标签页音频并交给本地 Whisper 转录。
+ *
+ * 使用 chrome.tabCapture.capture() 捕获整个标签页的音频流（对跨域视频有效，
+ * 不依赖 HTML5 video.captureStream，后者对 YouTube/B站等跨域流拿不到音轨），
+ * 然后在 service worker 里用 MediaRecorder 录制一段窗口，POST 给本地 Whisper。
+ *
+ * 限制：视频必须正在播放才能捕获到声音；DRM/加密流无法捕获。
  * @param {number} tabId
  * @param {Object} settings
  * @param {Object} [opts]
  * @returns {Object}
  */
 async function handleCaptureAudioTranscribe(tabId, settings = null, opts = {}) {
-  const cfg =
-    settings ||
-    (await getSettings());
+  const cfg = settings || (await getSettings());
   if (!cfg.whisperEnabled) {
     return {
       success: false,
@@ -883,32 +887,157 @@ async function handleCaptureAudioTranscribe(tabId, settings = null, opts = {}) {
       message: "缺少标签页信息，无法捕获音频。",
     };
   }
+
+  // 先确认目标标签页存在。
+  let tab = null;
   try {
-    const probe = await chrome.tabs.sendMessage(tabId, {
-      action: "captureAudio",
-      options: {
-        seconds: 120,
-        whisperUrl: cfg.whisperServerUrl,
-        model: cfg.whisperModel,
-      },
-    });
-    if (!probe || !probe.success || !probe.text) {
+    tab = await chrome.tabs.get(tabId);
+  } catch (_e) {
+    return {
+      success: false,
+      error: "NO_TAB",
+      message: "找不到目标标签页，请重新打开侧边栏后重试。",
+    };
+  }
+  if (!tab || !tab.url || !/^https?:/i.test(tab.url)) {
+    return {
+      success: false,
+      error: "UNSUPPORTED_TAB",
+      message: "当前标签页不是网页，无法捕获音频。",
+    };
+  }
+
+  let captureStream;
+  try {
+    captureStream = await captureTabAudio(tabId);
+  } catch (e) {
+    return {
+      success: false,
+      error: "TAB_CAPTURE_FAILED",
+      message: `无法捕获标签页音频：${e.message}。请确认视频已开始播放，且没有使用 DRM/加密流。`,
+    };
+  }
+
+  const seconds = Math.min(Math.max(Number(opts.seconds) || 30, 5), 120);
+  try {
+    const text = await recordAndTranscribe(
+      captureStream,
+      seconds,
+      cfg.whisperServerUrl,
+      cfg.whisperModel,
+    );
+    if (!text || !text.trim()) {
       return {
         success: false,
-        error: probe?.error || "CAPTURE_FAILED",
-        message: probe?.message || "音频捕获/转录失败。",
+        error: "EMPTY_TRANSCRIPT",
+        message: "音频已捕获但转录为空。请确认视频已播放出声音，或稍后重试。",
       };
     }
-    const built = YTD_SUBTITLE_SOURCES.buildTranscriptFromPlainText(probe.text);
+    const built = YTD_SUBTITLE_SOURCES.buildTranscriptFromPlainText(text);
     built.note = "通过本地 Whisper 转录";
     return built;
   } catch (e) {
     return {
       success: false,
-      error: "CAPTURE_ERROR",
-      message: `音频捕获出错：${e.message}`,
+      error: "TRANSCRIBE_ERROR",
+      message: `转录失败：${e.message}`,
     };
+  } finally {
+    try {
+      captureStream.getTracks().forEach((t) => t.stop());
+    } catch (_e) {
+      /* ignore */
+    }
   }
+}
+
+/**
+ * 用 chrome.tabCapture.capture() 获取指定标签页的音频流。
+ * @param {number} tabId
+ * @returns {Promise<MediaStream>}
+ */
+function captureTabAudio(tabId) {
+  return new Promise((resolve, reject) => {
+    if (typeof chrome.tabCapture === "undefined" || !chrome.tabCapture.capture) {
+      reject(new Error("tabCapture API 不可用，请在 manifest 中加入 tabCapture 权限并重新加载扩展"));
+      return;
+    }
+    chrome.tabCapture.capture(
+      { audio: true, video: false },
+      (stream) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        if (!stream || stream.getAudioTracks().length === 0) {
+          reject(new Error("没有捕获到音频轨道，请确认视频已开始播放。"));
+          return;
+        }
+        resolve(stream);
+      },
+    );
+  });
+}
+
+/**
+ * 录制音频流指定秒数，POST 到本地 Whisper 服务，返回转录文本。
+ * @param {MediaStream} stream
+ * @param {number} seconds
+ * @param {string} whisperUrl
+ * @param {string} model
+ * @returns {Promise<string>}
+ */
+async function recordAndTranscribe(stream, seconds, whisperUrl, model) {
+  const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+    ? "audio/webm;codecs=opus"
+    : "";
+  const recorder = new MediaRecorder(
+    stream,
+    mime ? { mimeType: mime } : undefined,
+  );
+  const chunks = [];
+  recorder.ondataavailable = (ev) => {
+    if (ev.data && ev.data.size > 0) chunks.push(ev.data);
+  };
+  const stopped = new Promise((resolve, reject) => {
+    recorder.onstop = () =>
+      resolve(new Blob(chunks, { type: "audio/webm" }));
+    recorder.onerror = (ev) =>
+      reject(new Error(ev.error?.message || "录音失败"));
+  });
+
+  recorder.start(1000); // 每秒分块，避免大 chunk
+  await new Promise((r) => setTimeout(r, seconds * 1000));
+  recorder.stop();
+  const blob = await stopped;
+  if (!blob || blob.size === 0) {
+    throw new Error("录音为空，可能视频没有输出声音。");
+  }
+
+  const base = String(whisperUrl || "http://127.0.0.1:8000").replace(/\/+$/, "");
+  const form = new FormData();
+  form.append("file", blob, "capture.webm");
+  form.append("model", model || "small");
+
+  let resp;
+  try {
+    resp = await fetch(`${base}/transcribe`, {
+      method: "POST",
+      body: form,
+    });
+  } catch (e) {
+    throw new Error(`无法连接本地 Whisper 服务（${base}）：${e.message}。请确认 whisper_server.py 已启动。`);
+  }
+  let data = {};
+  try {
+    data = await resp.json();
+  } catch (_e) {
+    /* ignore */
+  }
+  if (!resp.ok || !data.text) {
+    throw new Error(data.message || `Whisper 服务返回 ${resp.status}`);
+  }
+  return data.text;
 }
 
 /**

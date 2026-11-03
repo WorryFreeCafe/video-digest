@@ -130,8 +130,8 @@ blindly spend a Supadata credit on every video:
 
 2. **No native subtitle → local Whisper transcription (optional).** If no
    platform caption exists and you enable **Local Whisper** in Settings, the
-   extension captures the currently-playing audio window (~2 minutes, via
-   `captureStream`) and sends it to a local [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
+   extension captures the tab's current audio (via `chrome.tabCapture`, which
+   works for cross-origin players) and sends it to a local [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
    service (`whisper/whisper_server.py`). Transcription happens on your machine
    and does not touch Supadata.
 

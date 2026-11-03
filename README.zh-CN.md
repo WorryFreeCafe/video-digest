@@ -126,7 +126,7 @@ YouTube Digest 现在按可用性路由字幕获取，不再每个视频都盲�
 
 1. **平台原生字幕（免费，不耗 Supadata）**：扩展会先在当前页面探测原生字幕，例如 YouTube 的 `captionTracks`、B 站免费字幕接口、或通用 HTML5 `video.textTracks`。找到就直接用于摘要，**0 消耗** Supadata。
 
-2. **无原生字幕 → 本地 Whisper 转录（可选）**：如果没有平台字幕、且你在设置里开启了**本地 Whisper**，扩展会通过 `captureStream` 捕获当前正在播放的音频窗口（约 2 分钟），发送到本地 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) 服务（`whisper/whisper_server.py`）转写。转录在你的电脑上进行，不经过 Supadata。
+2. **无原生字幕 → 本地 Whisper 转录（可选）**：如果没有平台字幕、且你在设置里开启了**本地 Whisper**，扩展会通过 `chrome.tabCapture` 捕获当前标签页的音频（对跨域播放器有效），发送到本地 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) 服务（`whisper/whisper_server.py`）转写。转录在你的电脑上进行，不经过 Supadata。
 
 3. **手动 Supadata 兜底**：Supadata 不再被自动调用。当既没有原生字幕、也没启用 Whisper 兜底时，侧边栏会显示手动**使用 Supadata（兜底）**按钮，只有你选择时才会消耗额度。
 
