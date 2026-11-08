@@ -18,6 +18,9 @@ skills-lock.json
 node_modules/
 dist/
 
+# Local verification scratch space (browser profiles, audio samples, probes)
+.verify_tmp/
+
 # Environment
 .env
 .env.*

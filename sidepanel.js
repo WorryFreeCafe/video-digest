@@ -27,8 +27,18 @@ let currentChannelName = "";
 let currentVideoDescription = "";
 let currentVideoDuration = 0;
 let isAnalysisLoading = false; // Track if analysis is in progress
+/**
+ * 缓存版本。字幕来源/解析逻辑有不兼容变化时 +1：
+ * v2 修好了 YouTube 字幕"空 200"导致的残缺转录（只剩几十秒），
+ * 旧缓存必须失效，否则用户会一直看到修复前的短字幕。
+ */
+const DIGEST_CACHE_VERSION = 2;
+
 let youtubeTabId = null; // Store the YouTube tab ID for reliable messaging
 let errorAction = null;
+// True when the last capture failed only because Chrome had not yet granted
+// activeTab; the panel then auto-retries as soon as the user invokes the icon.
+let awaitingCaptureGrant = false;
 
 // --- Translation state ---
 // The universal language control supports original content, Chinese, and an
@@ -285,6 +295,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     updateLoading(message.title, message.subtitle);
     sendResponse({ success: true });
   }
+  if (message.action === "extensionInvoked") {
+    // The toolbar icon (or Alt+Shift+9) just granted activeTab for this tab.
+    // If a capture was blocked waiting for that grant, resume it silently.
+    void retryCaptureAfterInvoke(message.tabId);
+    sendResponse({ success: true });
+  }
   if (message.action === "noteSaved") {
     // Refresh notes list when a new note is saved
     const filterAll = document
@@ -340,7 +356,8 @@ function panelIsShowingResults() {
  * refresh the digest when the video changed.
  */
 function handleFrontTabUrl(url) {
-  if (!(url || "").startsWith("https://www.youtube.com")) {
+  const platform = detectPlatformForUrl(url);
+  if (!platform) {
     // Start the position save, then close in this same event callback. Chrome
     // does not reliably honor window.close() after an asynchronous wait.
     void saveCurrentTranscriptViewState();
@@ -348,7 +365,15 @@ function handleFrontTabUrl(url) {
     return;
   }
 
-  const newVideoId = extractVideoId(url);
+  const newVideoId =
+    platform === "bilibili" ? extractBilibiliVideoId(url) : extractVideoId(url);
+  if (!newVideoId) {
+    // Same platform but not a watch page (home, search, space…): the panel has
+    // nothing to show, so fall back to the welcome state instead of closing.
+    showState("welcome");
+    return;
+  }
+
   // Refresh when the video changed, or when we're not currently showing
   // results (e.g. user went home, then clicked back into the same video).
   if (newVideoId !== currentVideoId || !panelIsShowingResults()) {
@@ -491,7 +516,8 @@ async function checkCurrentTab() {
       return;
     }
 
-    if (!tab.url.startsWith("https://www.youtube.com")) {
+    const platform = detectPlatformForUrl(tab.url);
+    if (!platform) {
       handleFrontTabUrl(tab.url);
       return;
     }
@@ -499,7 +525,10 @@ async function checkCurrentTab() {
     // Store the tab ID for reliable messaging later
     youtubeTabId = tab.id;
 
-    const videoId = extractVideoId(tab.url);
+    const videoId =
+      platform === "bilibili"
+        ? extractBilibiliVideoId(tab.url)
+        : extractVideoId(tab.url);
 
     if (videoId) {
       currentVideoUrl = tab.url;
@@ -560,11 +589,47 @@ function extractVideoId(url) {
   }
 }
 
+/**
+ * Which platform a tab URL belongs to. The side panel used to be YouTube-only;
+ * B站 goes through the same free native-subtitle path, so both are supported.
+ * @param {string} url
+ * @returns {"youtube"|"bilibili"|null}
+ */
+function detectPlatformForUrl(url) {
+  const value = url || "";
+  if (value.startsWith("https://www.youtube.com")) return "youtube";
+  if (
+    value.startsWith("https://www.bilibili.com") ||
+    value.startsWith("https://m.bilibili.com")
+  ) {
+    return "bilibili";
+  }
+  return null;
+}
+
+/**
+ * B站 watch URLs carry the video id in the path: /video/BV1xx411c7mD.
+ * 番剧 (ep/ss) pages are not supported because their subtitles live behind a
+ * different API surface.
+ * @param {string} url
+ * @returns {string|null}
+ */
+function extractBilibiliVideoId(url) {
+  try {
+    const { pathname } = new URL(url);
+    const match = pathname.match(/\/video\/(BV[0-9A-Za-z]+|av\d+)/i);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+
 // ============================================================
 // DIGEST PIPELINE
 // ============================================================
 
 async function startDigest(videoId, videoUrl, tabId) {
+  awaitingCaptureGrant = false;
   // Check if we already have this video loaded in memory
   if (videoId === currentVideoId && currentAnalysis) {
     showState("results");
@@ -1369,7 +1434,8 @@ function copyTranscript() {
 
 function exportTranscript() {
   const transcriptContent = getDisplayedTranscriptText();
-  const videoUrl = `https://youtube.com/watch?v=${currentVideoId}`;
+  const videoUrl =
+    currentVideoUrl || `https://youtube.com/watch?v=${currentVideoId}`;
 
   let exportText = "";
   exportText += `TRANSCRIPT\n`;
@@ -1439,6 +1505,7 @@ function showError(title, message) {
  * 无原生字幕时的提示：给出"使用 Supadata 兜底"和"开启 Whisper"两个可选操作。
  */
 function showSubtitleFallbackError(result) {
+  awaitingCaptureGrant = false;
   showState("error");
   document.getElementById("errorTitle").textContent =
     "No native subtitle found";
@@ -1458,6 +1525,11 @@ function showSubtitleFallbackError(result) {
 
 /**
  * 无字幕且 Whisper 转录失败时的提示。
+ *
+ * CAPTURE_NOT_INVOKED 是 Chrome 的授权限制，不是故障：扩展必须先在该标签页
+ * 被用户主动调用一次（点工具栏图标 / 快捷键）才会授予 tabCapture。此时把重试
+ * 变成"自动续跑"——用户点 icon 后 background 广播 extensionInvoked，这里立刻
+ * 重新采集，不用再回面板点第二次。
  */
 function showWhisperFallbackError(result) {
   showState("error");
@@ -1465,8 +1537,12 @@ function showWhisperFallbackError(result) {
     "Subtitle unavailable";
   document.getElementById("errorMessage").textContent =
     result.message || "字幕获取失败。请确认视频已播放、本地 Whisper 服务已启动。";
+
+  awaitingCaptureGrant = result.error === "CAPTURE_NOT_INVOKED";
   const btn = document.getElementById("errorBtn");
-  btn.textContent = "Try Whisper again";
+  btn.textContent = awaitingCaptureGrant
+    ? "I clicked the icon — retry"
+    : "Try Whisper again";
   errorAction = async () => {
     const r = await chrome.runtime.sendMessage({
       action: "captureAudioTranscribe",
@@ -1475,6 +1551,25 @@ function showWhisperFallbackError(result) {
     });
     applyTranscriptResult(r);
   };
+}
+
+/**
+ * Re-runs the blocked capture right after the user invokes the extension.
+ */
+async function retryCaptureAfterInvoke(tabId) {
+  if (!awaitingCaptureGrant) return;
+  if (Number.isInteger(tabId) && Number.isInteger(youtubeTabId)) {
+    if (tabId !== youtubeTabId) return;
+  }
+  awaitingCaptureGrant = false;
+  showState("loading");
+  updateLoading("Capturing tab audio", "Extension invoked — recording now");
+  const r = await chrome.runtime.sendMessage({
+    action: "captureAudioTranscribe",
+    tabId: youtubeTabId,
+    options: {},
+  });
+  applyTranscriptResult(r);
 }
 
 /**
@@ -2062,6 +2157,7 @@ async function saveToCache(videoId) {
       channelName: currentChannelName,
       paragraphCache: paragraphCacheForVideo,
       interfaceCache: interfaceCacheForVideo,
+      version: DIGEST_CACHE_VERSION,
       timestamp: Date.now(),
     };
 
@@ -2133,6 +2229,13 @@ async function loadFromCache(videoId) {
     const cached = result[`digest_${videoId}`];
 
     if (!cached) return null;
+
+    // 版本不匹配：旧逻辑存下的字幕可能残缺（例如 YouTube 只拿到 30 秒音频），
+    // 直接丢弃并重新抓取。
+    if ((cached.version || 0) < DIGEST_CACHE_VERSION) {
+      await chrome.storage.local.remove(`digest_${videoId}`);
+      return null;
+    }
 
     // Cache expires after 30 days
     const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;

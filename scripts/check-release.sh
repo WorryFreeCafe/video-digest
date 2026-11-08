@@ -29,8 +29,11 @@ public_allowlist=(
   "background.js"
   "settings.js"
   "content.js"
+  "caption-pot-hook.js"
   "subtitle-sources.js"
   "generic-video-probe.js"
+  "offscreen.html"
+  "offscreen.js"
   "sidepanel.html"
   "sidepanel.css"
   "sidepanel.js"
@@ -229,7 +232,9 @@ for file in "${javascript_files[@]}"; do
 done
 
 if compgen -G "tests/*.test.js" >/dev/null; then
-  node --test tests/*.test.js
+  # Keep stdout reserved for --print-files; TAP output must not be read as
+  # filenames by package-extension.sh.
+  node --test tests/*.test.js 1>&2
 fi
 
 if ((${#javascript_files[@]} > 0)); then

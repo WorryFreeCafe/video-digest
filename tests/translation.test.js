@@ -263,7 +263,7 @@ test("new videos default to Original while returning videos restore their choice
 test("Overview shares the Transcript batch generation and retries when opened", () => {
   const js = read("sidepanel.js");
   const transcriptFunction = js.match(
-    /async function translateTranscript\(\)[\s\S]*?\n}\n\nfunction setTranslatingSpinner/,
+    /async function translateTranscript\(\)[\s\S]*?\r?\n}\r?\n\r?\nfunction setTranslatingSpinner/,
   )?.[0];
 
   assert.ok(transcriptFunction);

@@ -60,12 +60,14 @@ async function loadPromptSection(fileName, heading, variables = {}) {
     sectionStart,
     nextSection === -1 ? markdown.length : nextSection,
   );
-  const fenceMatch = section.match(/```(?:[A-Za-z0-9_-]+)?\n([\s\S]*?)\n```/);
+  // Prompt files are checked out with CRLF on Windows (core.autocrlf=true)
+  // and LF elsewhere. Accept both so prompt loading works on every platform.
+  const fenceMatch = section.match(/```(?:[A-Za-z0-9_-]+)?\r?\n([\s\S]*?)\r?\n```/);
   if (!fenceMatch) {
     throw new Error(`Prompt section not found: ${fileName}#${heading}`);
   }
 
-  let prompt = fenceMatch[1];
+  let prompt = fenceMatch[1].replace(/\r\n/g, "\n");
   for (const [key, value] of Object.entries(variables)) {
     prompt = prompt.split(`{${key}}`).join(String(value ?? ""));
   }
@@ -234,7 +236,7 @@ async function readBoundedAiResponse(response, onActivity) {
  * Chrome's Side Panel API lets us show a persistent panel alongside the page.
  */
 chrome.action.onClicked.addListener((tab) => {
-  if (!(tab.url || "").startsWith("https://www.youtube.com")) {
+  if (!isSupportedPlatformUrl(tab.url)) {
     void updatePanelForTab(tab.id, tab.url, tab.windowId);
     return;
   }
@@ -246,12 +248,29 @@ chrome.action.onClicked.addListener((tab) => {
     enabled: true,
   });
   chrome.sidePanel.open({ tabId: tab.id });
+
+  // This click is what grants activeTab (the "extension has been invoked"
+  // flag Chrome checks before tab audio capture). Tell the panel so it can
+  // resume a capture that was blocked a second ago.
+  chrome.storage.local.set({ ytd_last_invoke: Date.now() });
+  chrome.runtime
+    .sendMessage({ action: "extensionInvoked", tabId: tab.id })
+    .catch(() => {});
 });
 
 /**
- * Allow the side panel to open on any page, but it's designed for YouTube.
+ * Keep the click on our own handler: `openPanelOnActionClick: true` opens the
+ * panel straight from Chrome's UI without dispatching action.onClicked, and
+ * without granting activeTab. tabCapture then always fails with "Extension
+ * has not been invoked for the current page" no matter how often the icon is
+ * clicked. Explicitly reset it in case an older build stored it.
  */
-chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+const panelBehavior = chrome.sidePanel?.setPanelBehavior?.({
+  openPanelOnActionClick: false,
+});
+if (panelBehavior && typeof panelBehavior.catch === "function") {
+  panelBehavior.catch(() => {});
+}
 
 chrome.runtime.onInstalled.addListener(({ reason }) => {
   if (reason === "install") chrome.runtime.openOptionsPage();
@@ -291,9 +310,25 @@ async function closePanelForTab(tabId, windowId) {
   }
 }
 
+/**
+ * Platforms the side panel can work on. YouTube was the original target; B站
+ * uses the same free native-subtitle path (`x/player/wbi/v2`), so the panel is
+ * enabled there too instead of being force-closed.
+ * @param {string} [url]
+ * @returns {boolean}
+ */
+function isSupportedPlatformUrl(url) {
+  const value = url || "";
+  return (
+    value.startsWith("https://www.youtube.com") ||
+    value.startsWith("https://www.bilibili.com") ||
+    value.startsWith("https://m.bilibili.com")
+  );
+}
+
 async function updatePanelForTab(tabId, url, windowId) {
-  const isYouTube = (url || "").startsWith("https://www.youtube.com");
-  if (!isYouTube) {
+  const isSupported = isSupportedPlatformUrl(url);
+  if (!isSupported) {
     // Close the visible instance first. Then disable this tab so Chrome cannot
     // reopen the global default panel as navigation settles.
     await closePanelForTab(tabId, windowId);
@@ -368,7 +403,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === "captureAudioTranscribe") {
     // 手动触发：捕获当前播放音频并交给本地 Whisper 转录。
-    handleCaptureAudioTranscribe(message.tabId, message.options)
+    // 第三个参数才是 options；第二位是 settings（null 表示实时读取）。
+    handleCaptureAudioTranscribe(message.tabId, null, message.options)
       .then(sendResponse)
       .catch((err) => sendResponse({ error: err.message }));
     return true;
@@ -545,19 +581,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           tabs[0]?.url,
         );
 
-        // If no YouTube tab found, try broader query
-        if (!tabs[0] || !tabs[0].url?.includes("youtube.com")) {
+        // The panel is scoped per tab, so the active tab on a supported
+        // platform is authoritative (YouTube or B站). Only fall back to a
+        // platform-wide search when the focused tab is something else.
+        if (!isSupportedPlatformUrl(tabs[0]?.url)) {
           tabs = await chrome.tabs.query({
-            url: "https://www.youtube.com/*",
+            url: ["https://www.youtube.com/*", "https://*.bilibili.com/*"],
             active: true,
           });
-          debugLog("[YouTube Digest BG] Active YouTube tabs:", tabs.length);
+          debugLog("[YouTube Digest BG] Active platform tabs:", tabs.length);
         }
 
-        // Still nothing? Try any YouTube tab
+        // Still nothing? Try any platform tab
         if (!tabs[0]) {
-          tabs = await chrome.tabs.query({ url: "https://www.youtube.com/*" });
-          debugLog("[YouTube Digest BG] Any YouTube tabs:", tabs.length);
+          tabs = await chrome.tabs.query({
+            url: ["https://www.youtube.com/*", "https://*.bilibili.com/*"],
+          });
+          debugLog("[YouTube Digest BG] Any platform tabs:", tabs.length);
         }
 
         if (tabs[0]) {
@@ -580,7 +620,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // real channel ("Replit and Stripe"), and its description is
           // truncated while the box is collapsed. We fall back to the DOM
           // only for fields the player didn't provide.
-          if (message.payload?.action === "getVideoInfo") {
+          if (
+            message.payload?.action === "getVideoInfo" &&
+            (tabs[0].url || "").includes("youtube.com")
+          ) {
             const playerInfo = await getPlayerVideoDetails(tabs[0].id);
             if (playerInfo) {
               response = {
@@ -672,7 +715,7 @@ async function handleFetchTranscriptSmart(videoId, tabId) {
 
   // 1) 平台原生字幕预检（免费，不耗 Supadata）
   const platform = await probePlatformSubtitle(videoId, tabId, settings);
-  if (platform && platform.success && platform.transcript?.length) {
+  if (platform && platform.success !== false && platform.transcript?.length) {
     return YTD_SUBTITLE_SOURCES.sourceResult("platform", {
       transcript: platform.transcript,
       transcriptText: platform.transcriptText,
@@ -693,7 +736,7 @@ async function handleFetchTranscriptSmart(videoId, tabId) {
         transcriptText: whisper.transcriptText,
         transcriptTextTimestamped: whisper.transcriptTextTimestamped,
         language: null,
-        note: "无原生字幕，已通过本地 Whisper 转录。",
+        note: "无原生字幕，已通过本地 Whisper 转录（仅覆盖所捕获的一小段音频）。",
       });
     }
     return YTD_SUBTITLE_SOURCES.sourceResult("whisper", {
@@ -725,6 +768,27 @@ async function handleFetchTranscriptSmart(videoId, tabId) {
  *   - 通用 html：探测 video.textTracks
  * @returns {Object|null}
  */
+/**
+ * 把"已构建好的字幕对象"包成统一来源结构。
+ *
+ * buildTranscriptFromChunks / fetchBilibiliSubtitle 只返回 transcript 本体，
+ * 不带 success / source 字段；而 handleFetchTranscriptSmart 以 platform.success
+ * 作为"原生字幕可用"的判据。少了这层包装，B 站/YouTube/通用 video 的原生字幕
+ * 会被整体判为不可用，直接掉到 Whisper 兜底（表现为"未检测到原生字幕"）。
+ */
+function asPlatformResult(built, note) {
+  if (!built || !Array.isArray(built.transcript) || built.transcript.length === 0) {
+    return null;
+  }
+  return YTD_SUBTITLE_SOURCES.sourceResult("platform", {
+    transcript: built.transcript,
+    transcriptText: built.transcriptText,
+    transcriptTextTimestamped: built.transcriptTextTimestamped,
+    language: built.language ?? null,
+    note,
+  });
+}
+
 async function probePlatformSubtitle(videoId, tabId, settings) {
   if (!tabId) return null;
 
@@ -740,7 +804,10 @@ async function probePlatformSubtitle(videoId, tabId, settings) {
 
   // B站：走免费字幕接口（不需要 Supadata）
   if (site === "bilibili") {
-    return await fetchBilibiliSubtitle(tabId, videoId);
+    return asPlatformResult(
+      await fetchBilibiliSubtitle(tabId, videoId),
+      "来自 B 站原生字幕，未使用 Supadata。",
+    );
   }
 
   // 通用 html video：探测原生 textTracks
@@ -750,7 +817,10 @@ async function probePlatformSubtitle(videoId, tabId, settings) {
         action: "probeGenericSubtitle",
       });
       if (probe && probe.found && probe.chunks?.length) {
-        return YTD_SUBTITLE_SOURCES.buildTranscriptFromChunks(probe.chunks);
+        return asPlatformResult(
+          YTD_SUBTITLE_SOURCES.buildTranscriptFromChunks(probe.chunks),
+          "来自页面原生字幕轨，未使用 Supadata。",
+        );
       }
       return null;
     } catch (_e) {
@@ -762,15 +832,46 @@ async function probePlatformSubtitle(videoId, tabId, settings) {
   // 是否走 Supadata 兜底。这里尝试从 player 取字幕轨道。
   try {
     const player = await getPlayerVideoDetails(tabId);
-    if (player && player.captionTracks && player.captionTracks.length > 0) {
-      const first = player.captionTracks[0];
-      if (first && first.baseUrl) {
+    const tracks = (player && player.captionTracks) || [];
+    if (!tracks.length) return null;
+    const trackLangs = tracks.map((t) => t.lang).filter(Boolean);
+
+    // 1) 直接请求 baseUrl。YouTube 现在对没有 pot（proof-of-origin token）
+    //    的请求返回 **HTTP 200 + 空响应体**，所以必须按内容长度判断，
+    //    只看 resp.ok 会把空字幕当成成功，最后掉进 30 秒 Whisper 兜底。
+    const first = tracks[0];
+    if (first && first.baseUrl) {
+      try {
         const resp = await fetch(first.baseUrl);
-        const xml = await resp.text();
-        const parsed = parseYoutubeCaptionXml(xml);
-        if (parsed.length) {
-          return YTD_SUBTITLE_SOURCES.buildTranscriptFromChunks(parsed);
+        if (resp.ok) {
+          const body = await resp.text();
+          if (body && body.length > 200) {
+            const parsed = parseYoutubeCaptionBody(body);
+            if (parsed.length) {
+              return asPlatformResult(
+                YTD_SUBTITLE_SOURCES.buildTranscriptFromChunks(parsed),
+                "来自 YouTube 原生字幕，未使用 Supadata。",
+              );
+            }
+          }
         }
+      } catch (_e) {
+        /* 继续尝试 pot 通道 */
+      }
+    }
+
+    // 2) pot 通道：让页面交出播放器自己带签名的 timedtext URL，
+    //    改写 lang 后即可拿到整条字幕轨（含完整时间轴）。
+    const potResult = await requestYoutubeCaptionFromPage(tabId, trackLangs);
+    if (potResult && potResult.success) {
+      const parsed = parseYoutubeCaptionBody(potResult.text);
+      if (parsed.length) {
+        const built = YTD_SUBTITLE_SOURCES.buildTranscriptFromChunks(parsed);
+        if (potResult.lang) built.language = potResult.lang;
+        return asPlatformResult(
+          built,
+          "来自 YouTube 原生字幕，未使用 Supadata。",
+        );
       }
     }
     return null;
@@ -780,31 +881,165 @@ async function probePlatformSubtitle(videoId, tabId, settings) {
 }
 
 /**
+ * 请内容脚本用播放器带 pot 的 URL 取全量字幕。
+ * 内容脚本跑在页面上下文里，带得上 cookie，也能读到播放器请求过的 URL。
+ */
+async function requestYoutubeCaptionFromPage(tabId, trackLangs) {
+  const ask = async () => {
+    try {
+      return await chrome.tabs.sendMessage(tabId, {
+        action: "fetchYoutubeCaptionText",
+        trackLangs: Array.isArray(trackLangs) ? trackLangs : [],
+      });
+    } catch (_e) {
+      // 内容脚本未注入（扩展刚更新、页面还没刷新）时 sendMessage 会抛错。
+      return null;
+    }
+  };
+
+  let res = await ask();
+  // 页面在扩展更新之前就打开了：这次没有 pot 钩子，补注入一次再试，
+  // 免得用户为了取字幕被迫刷新页面。
+  if (!res || (!res.success && res.reason === "NO_POT_URL")) {
+    if (await ensureCaptionPotHook(tabId)) {
+      res = await ask();
+    }
+  }
+  if (!res || !res.success) {
+    if (res && res.reason) {
+      debugLog("[YouTube Digest BG] Caption pot path failed:", res.reason);
+    }
+    return null;
+  }
+  return res;
+}
+
+/**
+ * 把 pot 钩子补注入到已打开的页面（MAIN world）。
+ * caption-pot-hook.js 自带 `__ytdCaptionPotHooked` 守卫，重复注入是安全的。
+ */
+async function ensureCaptionPotHook(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      files: ["caption-pot-hook.js"],
+    });
+    return true;
+  } catch (_e) {
+    return false;
+  }
+}
+
+/**
+ * 解析 YouTube 字幕响应体，自动识别 json3 与 XML 两种格式。
+ */
+function parseYoutubeCaptionBody(body) {
+  const text = String(body || "").trim();
+  if (!text) return [];
+  if (text.startsWith("{")) return parseYoutubeCaptionJson3(text);
+  return parseYoutubeCaptionXml(text);
+}
+
+/**
+ * 解析 YouTube timedtext 的 json3 格式。
+ * 结构：{ events:[{ tStartMs, dDurationMs, segs:[{ utf8, tOffsetMs }] }] }
+ * 自动字幕会有大量重复片段（滚动式刷新），这里做一次连续去重。
+ */
+function parseYoutubeCaptionJson3(json) {
+  let data;
+  try {
+    data = JSON.parse(json);
+  } catch (_e) {
+    return [];
+  }
+  const events = Array.isArray(data.events) ? data.events : [];
+  const chunks = [];
+  let previous = "";
+  for (const event of events) {
+    const segs = event && event.segs;
+    if (!Array.isArray(segs) || !segs.length) continue;
+    const text = segs
+      .map((s) => (s && s.utf8) || "")
+      .join("")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!text) continue;
+    // json3 里相邻事件的文本经常只是上一句的滚动补全，重复内容直接丢弃。
+    if (text === previous) continue;
+    previous = text;
+    chunks.push({ start: Number(event.tStartMs || 0) / 1000, text });
+  }
+  return chunks;
+}
+
+/**
+ * 从 B站播放页读取 cid / bvid。
+ *
+ * 必须在 MAIN world 注入：content script 默认跑在 isolated world，页面的
+ * `window.__INITIAL_STATE__` 在隔离世界里是 undefined，直接读会导致 cid
+ * 永远为 null，B 站免费字幕路径整体失效（只能退回 Whisper）。
+ *
+ * 返回值用 JSON 字符串传回，避免结构化克隆对页面对象的限制。
+ */
+async function readBilibiliSubtitleMeta(tabId, videoId) {
+  try {
+    const [injection] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: () => {
+        const state = window.__INITIAL_STATE__;
+        if (!state) return "";
+        const videoData = state.videoData || state.videoInfo || null;
+        const cid =
+          state.cid ||
+          (videoData && videoData.cid) ||
+          (Array.isArray(state.pages) && state.pages[0] && state.pages[0].cid) ||
+          null;
+        const bvid = state.bvid || (videoData && videoData.bvid) || null;
+        if (!cid) return "";
+        return JSON.stringify({ cid: Number(cid), bvid: bvid || null });
+      },
+    });
+    const raw = injection?.result;
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed?.cid) return parsed;
+    }
+  } catch (_e) {
+    /* fall through to the content-script path below */
+  }
+
+  // 兜底：老路径（页面结构变化或 MAIN world 注入被策略禁用时）
+  try {
+    const meta = await chrome.tabs.sendMessage(tabId, {
+      action: "fetchBilibiliSubtitleMeta",
+    });
+    if (meta?.cid) return meta;
+  } catch (_e) {
+    /* ignore */
+  }
+  return { cid: null, bvid: videoId || null };
+}
+
+/**
  * 从 B站字幕接口获取字幕（全程免费，不消耗 Supadata 额度）。
  * 需要 cid；若页面未暴露 cid，则返回 null 由调用方兜底。
  */
 async function fetchBilibiliSubtitle(tabId, videoId) {
-  let meta;
-  try {
-    meta = await chrome.tabs.sendMessage(tabId, {
-      action: "fetchBilibiliSubtitleMeta",
-    });
-  } catch (_e) {
-    return null;
-  }
+  const meta = await readBilibiliSubtitleMeta(tabId, videoId);
   const cid = meta?.cid;
   const bvid = meta?.bvid || videoId;
   if (!cid || !bvid) return null;
 
   try {
-    // B站播放信息接口（无需鉴权即可拿到字幕地址）
-    const playerUrl = new URL(
-      "https://api.bilibili.com/x/player/wbi/v2",
-    );
+    // B站播放信息接口：字幕列表（尤其 AI 字幕）只在登录会话下返回，
+    // 必须带 cookie。字幕文件同样在 aisubtitle.hdslb.com 上要求登录态。
+    const playerUrl = new URL("https://api.bilibili.com/x/player/wbi/v2");
     playerUrl.searchParams.set("bvid", bvid);
     playerUrl.searchParams.set("cid", cid);
     const infoResp = await fetch(playerUrl.toString(), {
-      credentials: "omit",
+      credentials: "include",
     });
     const info = await infoResp.json().catch(() => ({}));
     const subs = info?.data?.subtitle?.subtitles;
@@ -818,7 +1053,7 @@ async function fetchBilibiliSubtitle(tabId, videoId) {
       : subUrl.startsWith("http")
         ? subUrl
         : `https://${subUrl}`;
-    const subResp = await fetch(fullUrl, { credentials: "omit" });
+    const subResp = await fetch(fullUrl, { credentials: "include" });
     const subData = await subResp.json().catch(() => ({}));
     const body = subData?.body;
     if (!Array.isArray(body) || body.length === 0) return null;
@@ -861,9 +1096,10 @@ function parseYoutubeCaptionXml(xml) {
 /**
  * 捕获当前标签页音频并交给本地 Whisper 转录。
  *
- * 使用 chrome.tabCapture.capture() 捕获整个标签页的音频流（对跨域视频有效，
- * 不依赖 HTML5 video.captureStream，后者对 YouTube/B站等跨域流拿不到音轨），
- * 然后在 service worker 里用 MediaRecorder 录制一段窗口，POST 给本地 Whisper。
+ * Chrome MV3 的 service worker 没有 DOM，也就没有 getUserMedia/MediaRecorder。
+ * 这里只调用 chrome.tabCapture.getMediaStreamId() 拿到一次性流 id，把它交给
+ * Offscreen Document（offscreen.js）完成录制并 POST 给本地 Whisper。
+ * 这也能捕获 YouTube/B站等跨域播放器的音频，不依赖 video.captureStream。
  *
  * 限制：视频必须正在播放才能捕获到声音；DRM/加密流无法捕获。
  * @param {number} tabId
@@ -907,25 +1143,13 @@ async function handleCaptureAudioTranscribe(tabId, settings = null, opts = {}) {
     };
   }
 
-  let captureStream;
-  try {
-    captureStream = await captureTabAudio(tabId);
-  } catch (e) {
-    return {
-      success: false,
-      error: "TAB_CAPTURE_FAILED",
-      message: `无法捕获标签页音频：${e.message}。请确认视频已开始播放，且没有使用 DRM/加密流。`,
-    };
-  }
-
   const seconds = Math.min(Math.max(Number(opts.seconds) || 30, 5), 120);
   try {
-    const text = await recordAndTranscribe(
-      captureStream,
+    const text = await captureViaOffscreen(tabId, {
       seconds,
-      cfg.whisperServerUrl,
-      cfg.whisperModel,
-    );
+      whisperUrl: cfg.whisperServerUrl,
+      model: cfg.whisperModel,
+    });
     if (!text || !text.trim()) {
       return {
         success: false,
@@ -934,110 +1158,120 @@ async function handleCaptureAudioTranscribe(tabId, settings = null, opts = {}) {
       };
     }
     const built = YTD_SUBTITLE_SOURCES.buildTranscriptFromPlainText(text);
-    built.note = "通过本地 Whisper 转录";
-    return built;
+    // 必须带 success / source：handleFetchTranscriptSmart 以 whisper.success
+    // 判定兜底是否可用，直接返回 buildTranscriptFromPlainText 的裸对象会让
+    // 真实转录成功也被当成 WHISPER_FAILED。
+    return YTD_SUBTITLE_SOURCES.sourceResult("whisper", {
+      ...built,
+      note: `通过本地 Whisper 转录（只捕获了当前播放位置后的 ${seconds} 秒）`,
+    });
   } catch (e) {
+    const raw = String(e?.message || e);
+    // Chrome only allows tabCapture after the extension has been invoked on
+    // that tab (activeTab). Without this mapping the side panel shows the raw
+    // English DevTools-style error, which reads like a bug rather than a step
+    // the user has to take.
+    if (/has not been invoked/i.test(raw)) {
+      return {
+        success: false,
+        error: "CAPTURE_NOT_INVOKED",
+        message:
+          "Chrome 要求先在这个网页上唤醒一次扩展，才允许捕获标签页音频。请点一下工具栏的 YouTube Digest 图标（或按 Alt+Shift+9），面板会自动继续转录。",
+      };
+    }
     return {
       success: false,
       error: "TRANSCRIBE_ERROR",
-      message: `转录失败：${e.message}`,
+      message: `转录失败：${raw}`,
     };
-  } finally {
-    try {
-      captureStream.getTracks().forEach((t) => t.stop());
-    } catch (_e) {
-      /* ignore */
-    }
+  }
+}
+
+const OFFSCREEN_DOCUMENT_PATH = "offscreen.html";
+
+/**
+ * Create the offscreen document once and reuse it for later recordings.
+ * MV3 service workers have no DOM, so they cannot call getUserMedia() or
+ * MediaRecorder; the offscreen document owns the MediaStream instead.
+ */
+async function ensureOffscreenDocument() {
+  const url = chrome.runtime.getURL(OFFSCREEN_DOCUMENT_PATH);
+  if (chrome.runtime.getContexts) {
+    const existing = await chrome.runtime.getContexts({
+      contextTypes: ["OFFSCREEN_DOCUMENT"],
+      documentUrls: [url],
+    });
+    if (existing && existing.length > 0) return;
+  }
+  try {
+    await chrome.offscreen.createDocument({
+      url: OFFSCREEN_DOCUMENT_PATH,
+      reasons: ["USER_MEDIA"],
+      justification:
+        "Capture the active tab's audio and send it to the local Whisper service.",
+    });
+  } catch (error) {
+    // A concurrent recording may have created the document already.
+    if (!/single offscreen document/i.test(error?.message || "")) throw error;
   }
 }
 
 /**
- * 用 chrome.tabCapture.capture() 获取指定标签页的音频流。
+ * Ask Chrome for a one-shot stream id for the target tab. Unlike
+ * tabCapture.capture(), getMediaStreamId() is safe to call from a service
+ * worker; the id is consumed by getUserMedia() in the offscreen document.
  * @param {number} tabId
- * @returns {Promise<MediaStream>}
- */
-function captureTabAudio(tabId) {
-  return new Promise((resolve, reject) => {
-    if (typeof chrome.tabCapture === "undefined" || !chrome.tabCapture.capture) {
-      reject(new Error("tabCapture API 不可用，请在 manifest 中加入 tabCapture 权限并重新加载扩展"));
-      return;
-    }
-    chrome.tabCapture.capture(
-      { audio: true, video: false },
-      (stream) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-          return;
-        }
-        if (!stream || stream.getAudioTracks().length === 0) {
-          reject(new Error("没有捕获到音频轨道，请确认视频已开始播放。"));
-          return;
-        }
-        resolve(stream);
-      },
-    );
-  });
-}
-
-/**
- * 录制音频流指定秒数，POST 到本地 Whisper 服务，返回转录文本。
- * @param {MediaStream} stream
- * @param {number} seconds
- * @param {string} whisperUrl
- * @param {string} model
  * @returns {Promise<string>}
  */
-async function recordAndTranscribe(stream, seconds, whisperUrl, model) {
-  const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-    ? "audio/webm;codecs=opus"
-    : "";
-  const recorder = new MediaRecorder(
-    stream,
-    mime ? { mimeType: mime } : undefined,
-  );
-  const chunks = [];
-  recorder.ondataavailable = (ev) => {
-    if (ev.data && ev.data.size > 0) chunks.push(ev.data);
-  };
-  const stopped = new Promise((resolve, reject) => {
-    recorder.onstop = () =>
-      resolve(new Blob(chunks, { type: "audio/webm" }));
-    recorder.onerror = (ev) =>
-      reject(new Error(ev.error?.message || "录音失败"));
-  });
-
-  recorder.start(1000); // 每秒分块，避免大 chunk
-  await new Promise((r) => setTimeout(r, seconds * 1000));
-  recorder.stop();
-  const blob = await stopped;
-  if (!blob || blob.size === 0) {
-    throw new Error("录音为空，可能视频没有输出声音。");
+async function getTabCaptureStreamId(tabId) {
+  if (!chrome.tabCapture?.getMediaStreamId) {
+    throw new Error(
+      "chrome.tabCapture.getMediaStreamId 不可用，需要 Chrome 116+ 与 tabCapture 权限。",
+    );
   }
+  return chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
+}
 
-  const base = String(whisperUrl || "http://127.0.0.1:8000").replace(/\/+$/, "");
-  const form = new FormData();
-  form.append("file", blob, "capture.webm");
-  form.append("model", model || "small");
-
-  let resp;
+/**
+ * Delegate recording and transcription to the offscreen document.
+ * @param {number} tabId
+ * @param {{seconds:number, whisperUrl:string, model:string}} options
+ * @returns {Promise<string>} transcribed text
+ */
+async function captureViaOffscreen(tabId, options) {
+  await ensureOffscreenDocument();
+  let streamId;
   try {
-    resp = await fetch(`${base}/transcribe`, {
-      method: "POST",
-      body: form,
+    streamId = await getTabCaptureStreamId(tabId);
+  } catch (error) {
+    if (!/active stream/i.test(error?.message || "")) throw error;
+    // A previous recording was interrupted (offscreen document killed, tab
+    // closed mid-record) and Chrome still counts its stream as active, so the
+    // tab becomes un-capturable. Closing the document releases it; ask again.
+    await chrome.offscreen.closeDocument().catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await ensureOffscreenDocument();
+    streamId = await getTabCaptureStreamId(tabId);
+  }
+  let response;
+  try {
+    response = await chrome.runtime.sendMessage({
+      action: "recordTabAudio",
+      options: { ...options, streamId },
     });
-  } catch (e) {
-    throw new Error(`无法连接本地 Whisper 服务（${base}）：${e.message}。请确认 whisper_server.py 已启动。`);
+  } catch (error) {
+    // The id was minted but never consumed, which would leave the tab locked
+    // for the next attempt; drop the offscreen document to release it.
+    await chrome.offscreen.closeDocument().catch(() => {});
+    throw new Error(`无法与 offscreen document 通信：${error.message}`);
   }
-  let data = {};
-  try {
-    data = await resp.json();
-  } catch (_e) {
-    /* ignore */
+  if (!response) {
+    throw new Error("offscreen document 没有响应，请重新加载扩展后重试。");
   }
-  if (!resp.ok || !data.text) {
-    throw new Error(data.message || `Whisper 服务返回 ${resp.status}`);
+  if (!response.success) {
+    throw new Error(response.error || "音频转录失败。");
   }
-  return data.text;
+  return response.text;
 }
 
 /**
@@ -2146,3 +2380,21 @@ globalThis.__YTD_TRANSLATION_TESTING__ = {
   closePanelForTab,
   updatePanelForTab,
 };
+
+// Keyboard shortcut (default Alt+Shift+9): invoking a command grants
+// activeTab on the current tab, exactly like clicking the toolbar icon.
+// This gives tab audio capture a second, always-visible invocation path.
+chrome.commands?.onCommand.addListener((command) => {
+  if (command !== "invoke-capture") return;
+  chrome.tabs
+    .query({ active: true, currentWindow: true })
+    .then(([tab]) => {
+      if (!tab) return;
+      chrome.storage.local.set({ ytd_last_invoke: Date.now() });
+      // Same effect as clicking the icon: activeTab is now granted, so let the
+      // panel resume a capture that was waiting for this.
+      chrome.runtime
+        .sendMessage({ action: "extensionInvoked", tabId: tab.id })
+        .catch(() => {});
+    });
+});

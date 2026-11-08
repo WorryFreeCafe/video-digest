@@ -125,14 +125,16 @@ test("the first non-YouTube navigation is checked again after commit", () => {
   );
 });
 
-test("the panel never borrows a background YouTube tab", () => {
+test("the panel follows only the front tab of a supported platform", () => {
   assert.match(
     source,
     /const tabs = await chrome\.tabs\.query\(\{\s*active: true,\s*lastFocusedWindow: true,\s*\}\);/,
   );
+  // YouTube and B站 are supported; anything else goes to handleFrontTabUrl,
+  // which closes the panel rather than borrowing an unrelated tab.
   assert.match(
     source,
-    /if \(!tab\.url\.startsWith\("https:\/\/www\.youtube\.com"\)\) \{\s*handleFrontTabUrl\(tab\.url\);\s*return;/,
+    /const platform = detectPlatformForUrl\(tab\.url\);\s*if \(!platform\) \{\s*handleFrontTabUrl\(tab\.url\);\s*return;\s*\}/,
   );
   assert.doesNotMatch(
     source,

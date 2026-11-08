@@ -14,10 +14,14 @@ test("manifest uses minimized install-time permissions", () => {
   assert.equal(manifest.minimum_chrome_version, "116");
   assert.equal(packageJson.version, manifest.version);
   assert.equal(manifest.options_ui.page, "options.html");
-  assert.ok(!manifest.permissions.includes("activeTab"));
+  // activeTab is required: Chrome refuses tabCapture until the extension has
+  // been invoked on the tab, and that grant only exists when activeTab is
+  // declared. Dropping it makes every capture fail with "has not been invoked".
+  assert.ok(manifest.permissions.includes("activeTab"));
+  assert.ok(manifest.permissions.includes("tabCapture"));
   assert.ok(manifest.host_permissions.includes("https://api.deepseek.com/*"));
   assert.equal(Object.hasOwn(manifest, "optional_host_permissions"), false);
-  assert.equal(manifest.version, "1.3.0");
+  assert.equal(manifest.version, "1.3.1");
 });
 
 test("release copy documents current scope without em dashes", () => {

@@ -15,6 +15,40 @@ YouTube Digest is a bring-your-own-key project installed locally from GitHub. It
 
 ![YouTube Digest demo](YouTube%20Digest%20demo.png)
 
+## What is new in v1.3.1
+
+- Fixed YouTube transcripts arriving as one or two sentences. YouTube now
+  requires a proof-of-origin token (`pot`) on `/api/timedtext` and answers
+  **HTTP 200 with an empty body** without it. The old code checked only the
+  status code, so an empty body looked like "captions exist but are blank" and
+  the panel silently fell back to a 30-second Whisper capture.
+- Added `caption-pot-hook.js` (MAIN world, `document_start`): it hooks the
+  player's own caption requests and remembers the signed URL, which carries the
+  token. The content script rewrites `lang`/`fmt` on that URL and downloads the
+  full track. The signature does not cover `lang`/`tlang`, so switching away from
+  a translated track back to the original is safe.
+- Captions are parsed from json3 with their real timeline (measured locally:
+  605 segments spanning 0:00 → 15:36 on a 15:38 video).
+- The panel cache is now versioned (`DIGEST_CACHE_VERSION`), so shortened
+  transcripts stored by older builds are discarded and refetched automatically.
+- Turning captions on just to obtain the URL is undone afterwards, so the player
+  settings stay untouched.
+
+## What is new in v1.3.0
+
+- The side panel now works on Bilibili: watch pages get a Digest button that uses
+  the free native subtitle track, with no Supadata spend.
+- Fixed `Extension has not been invoked` no matter how often the icon was
+  clicked: the manifest now declares `activeTab`, and the action click opens the
+  panel itself (Chrome's `openPanelOnActionClick` swallows the click, so the
+  grant never happened).
+- When the panel asks for the grant, one icon click (or `Alt+Shift+9`) resumes
+  the capture automatically instead of requiring a second click.
+- Stale capture streams are released before retrying, so
+  `Cannot capture a tab with an active stream` no longer blocks a second run.
+- An empty Whisper result now reads "video not playing or muted" instead of the
+  confusing `Whisper service returned 200`.
+
 ## New in v1.2.0
 
 - Search transcript words or phrases and move through every match.
@@ -153,6 +187,23 @@ Then in Settings, enable **Local Whisper** and keep the default server URL
 `http://127.0.0.1:8000`. Note the same limitation as always: DRM / encrypted
 streams and videos that have not started playing cannot be captured, so this
 fallback only helps for playable, unencrypted videos.
+
+Two practical notes:
+
+- Bilibili's subtitle API only returns tracks for a signed-in session. If you are
+  logged out, the probe finds nothing and the flow falls through to Whisper.
+- Chrome only allows tab audio capture after the extension has been invoked on
+  that tab, and only the toolbar icon or the shortcut counts as an invocation.
+  The in-page Digest button opens the panel but does not grant activeTab. When
+  the grant is missing Chrome answers `Extension has not been invoked for the
+  current page`; the panel asks for one icon click and then resumes the capture
+  on its own.
+- The shortcut **Alt+Shift+9** does the same thing as clicking the icon (it also
+  grants activeTab for the current tab), which helps when the icon is folded into
+  the Extensions menu. Reloading the page drops the grant, so press it again.
+- The grant comes from declaring `activeTab` in the manifest plus one real
+  invocation. Without that permission every click fails with the same error, so
+  keep it in `permissions`.
 
 ## Supadata free tier and request costs
 

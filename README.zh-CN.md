@@ -17,6 +17,22 @@ YouTube Digest 是一个需要自行提供 API Key 的开源项目，通过 GitH
 
 ![YouTube Digest 双语演示](YouTube%20Digest%20demo%20bilingual.png)
 
+## v1.3.1 更新
+
+- 修复 YouTube 字幕只拿到一两句的问题：YouTube 现在要求 `/api/timedtext` 带 proof-of-origin token（`pot`），没有 pot 时接口返回 **HTTP 200 但响应体为空**，旧代码只看状态码，误判成"有字幕但内容为空"，最后掉进 30 秒 Whisper 兜底。
+- 新增 `caption-pot-hook.js`（MAIN world，`document_start`）：挂钩播放器自己的字幕请求，记下带 pot 的签名 URL；内容脚本改写 `lang`/`fmt` 后直接取整条字幕轨。签名不含 lang/tlang，所以可以安全地把译文轨切回原轨。
+- 字幕改为按 json3 解析，保留完整时间轴（本机实测 15 分 38 秒视频拿到 605 段，0:00 → 15:36）。
+- 面板缓存加版本号（`DIGEST_CACHE_VERSION`），旧版本存下的残缺字幕会自动失效并重新抓取，不用手动清缓存。
+- 为了取字幕临时打开 CC 后会自动关掉，不改变你的播放器设置。
+
+## v1.3.0 更新
+
+- 侧边栏现在支持 B 站：B 站播放页会注入 Digest 按钮，点开即用免费原生字幕，不消耗 Supadata 额度。
+- 修复"点多少次图标都提示 `Extension has not been invoked`"：清单补上 `activeTab` 权限，并改回由 `action.onClicked` 打开面板（`openPanelOnActionClick` 会吞掉点击，导致授权永远不生效）。
+- 面板提示需要唤醒时，点一次图标或按 `Alt+Shift+9` 会自动继续转录，不用再点第二次。
+- 再次录音时自动清理上一次残留的音频流，避免出现 `Cannot capture a tab with an active stream`。
+- Whisper 返回空文本时改为明确提示"视频未播放或已静音"，不再显示容易误解的 `returned 200`。
+
 ## v1.2.0 更新
 
 - 搜索字幕中的单词或短语，并依次查看所有匹配位置。
@@ -140,6 +156,13 @@ python whisper/whisper_server.py --model small --port 8000
 ```
 
 然后在设置中开启**本地 Whisper**，保持默认服务地址 `http://127.0.0.1:8000`。和以前一样的限制：DRM / 加密流、以及尚未开始播放的视频无法捕获音频，所以该兜底只对可播放、未加密的视频有效。
+
+两个实操注意点：
+
+- B 站字幕接口只对**已登录**的会话返回字幕轨道。未登录时探测结果为空，流程会落到 Whisper 兜底。
+- Chrome 只允许在"扩展已在该标签页被唤醒"之后捕获标签页音频，而**唤醒只认工具栏图标或快捷键**：页面里的 Digest 按钮能打开面板，但它不算授权。没唤醒时 Chrome 会返回 `Extension has not been invoked for the current page`，面板会提示你点一次图标，点完会自动接着转录，不用再点第二次。
+- 也可以用快捷键 **Alt+Shift+9** 代替点图标：效果相同（同样会授予当前标签页的采集授权），适合图标被折叠进"扩展程序"菜单时使用。注意**刷新页面会撤销授权**，刷新后需要再按一次。
+- 授权来自 manifest 里的 `activeTab` 权限加上一次真实调用；缺少 `activeTab` 时无论点多少次图标都会失败，所以不要把它从 `permissions` 里删掉。
 
 ## Supadata 免费额度和请求成本
 

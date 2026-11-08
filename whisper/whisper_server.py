@@ -34,6 +34,25 @@ from typing import Optional
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
+# faster-whisper 1.2.x calls av.open(..., metadata_errors="ignore"), but PyAV
+# 15+ removed that keyword (this machine has av 19). Its dependency declares
+# only "av>=11" with no upper bound, so a fresh install can break decoding.
+# Drop the unsupported keyword so any installed PyAV version can decode audio.
+try:
+    import av
+
+    if not getattr(av, "_ytd_av_patched", False):
+        _original_av_open = av.open
+
+        def _av_open_compatible(*args, **kwargs):
+            kwargs.pop("metadata_errors", None)
+            return _original_av_open(*args, **kwargs)
+
+        av.open = _av_open_compatible
+        av._ytd_av_patched = True
+except ImportError:  # pragma: no cover - av ships with faster-whisper
+    pass
+
 MODEL_LOCK = threading.Lock()
 _LOADED_MODEL: Optional[object] = None
 _LOADED_MODEL_NAME: Optional[str] = None
@@ -46,8 +65,11 @@ app.add_middleware(
     allow_origins=[
         "http://127.0.0.1",
         "http://localhost",
-        "chrome-extension://*",
     ],
+    # allow_origins is an exact-match list, so a literal "chrome-extension://*"
+    # never matches. The offscreen document's origin is chrome-extension://<id>,
+    # and local test pages may include a port; accept both via a regex.
+    allow_origin_regex=r"^(chrome-extension://.*|https?://(127\.0\.0\.1|localhost)(:\d+)?)$",
     allow_methods=["*"],
     allow_headers=["*"],
 )

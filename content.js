@@ -30,6 +30,39 @@ let ytdDigestButton = null;
 let digestButtonObserver = null;
 let digestButtonReconcileTimer = null;
 let digestButtonResizeListenerAdded = false;
+let biliDigestButton = null;
+let biliNavTimer = null;
+let biliLastHref = "";
+
+// 最近一次由播放器发出的、带 proof-of-origin token 的 timedtext URL。
+// 由 MAIN world 的 caption-pot-hook.js 通过 postMessage 送过来。没有 pot 的
+// URL 请求 YouTube 会返回空的 200，所以这里只接受带 pot 的那一种。
+let ytdCaptionPotUrl = "";
+let ytdCaptionPotAt = 0;
+let ytdCaptionPotWaiters = [];
+
+window.addEventListener("message", (event) => {
+  if (event.source !== window) return;
+  const data = event.data;
+  if (!data || data.source !== "ytd-caption-pot" || data.type !== "url") return;
+  if (!data.url) return;
+  ytdCaptionPotUrl = data.url;
+  ytdCaptionPotAt = data.at || Date.now();
+  const waiters = ytdCaptionPotWaiters;
+  ytdCaptionPotWaiters = [];
+  for (const fn of waiters) fn(ytdCaptionPotUrl);
+});
+
+/**
+ * Which platform this page belongs to. The same content script is injected on
+ * YouTube and B站, and each site needs its own toolbar selectors.
+ */
+const YTD_PAGE_SITE = (() => {
+  const host = window.location?.hostname || "";
+  if (host.endsWith("bilibili.com")) return "bilibili";
+  if (host.endsWith("youtube.com")) return "youtube";
+  return "generic";
+})();
 
 // ============================================================
 // INITIALIZATION
@@ -40,6 +73,13 @@ let digestButtonResizeListenerAdded = false;
  * We wait a bit for YouTube's UI to fully render.
  */
 function init() {
+  // B站 has a different toolbar and no note button; keep it isolated so the
+  // YouTube selectors never run there (they would retry forever and log noise).
+  if (YTD_PAGE_SITE === "bilibili") {
+    initBilibili();
+    return;
+  }
+
   // Register the global "n" keyboard shortcut once
   if (!ytdNoteKeyboardListenerAdded) {
     document.addEventListener("keydown", handleNoteKeyboardShortcut);
@@ -140,12 +180,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === "getCurrentTime") {
     // Return the current video playback time (used by auto-scroll)
-    const video = document.querySelector("video.html5-main-video");
+    const video = document.querySelector(
+      "video.html5-main-video, #bilibili-player video, video",
+    );
     sendResponse({
       currentTime: video ? Math.floor(video.currentTime) : 0,
       paused: video ? video.paused : true,
     });
     return false;
+  }
+
+  if (message.action === "fetchYoutubeCaptionText") {
+    // YouTube 全量字幕：借播放器带 pot 的签名 URL，绕开"空 200"。
+    fetchYoutubeCaptionText(message.trackLangs)
+      .then((result) => sendResponse(result))
+      .catch((err) => sendResponse({ success: false, reason: String(err) }));
+    return true; // async response
   }
 
   if (message.action === "probePlatformSubtitle") {
@@ -292,18 +342,7 @@ function createDigestButton() {
   digestButton.addEventListener("click", async (e) => {
     e.preventDefault();
     e.stopPropagation();
-
-    debugLog("[YouTube Digest] Digest button clicked");
-
-    // Send message to background script to open side panel
-    try {
-      const result = await chrome.runtime.sendMessage({
-        action: "openSidePanel",
-      });
-      debugLog("[YouTube Digest] openSidePanel response:", result);
-    } catch (err) {
-      console.error("[YouTube Digest] Failed to open side panel:", err);
-    }
+    await openDigestPanel("YouTube Digest");
   });
 
   ytdDigestButton = digestButton;
@@ -355,6 +394,170 @@ function injectDigestButton() {
   }
 
   debugLog("[YouTube Digest Content] Digest button reconciled");
+  return true;
+}
+
+/**
+ * Opens the side panel for the current tab from a page button.
+ *
+ * Chrome only allows sidePanel.open() inside a user gesture, so the message
+ * has to leave the content script immediately (no awaits before sending).
+ * The click itself does NOT grant activeTab — that still needs one toolbar
+ * icon click — so the panel UI is responsible for telling the user when audio
+ * capture needs that extra invocation.
+ */
+async function openDigestPanel(label = "Digest") {
+  debugLog(`[${label}] Digest button clicked`);
+  try {
+    const result = await chrome.runtime.sendMessage({ action: "openSidePanel" });
+    debugLog(`[${label}] openSidePanel response:`, result);
+    return result;
+  } catch (err) {
+    console.error(`[${label}] Failed to open side panel:`, err);
+    return null;
+  }
+}
+
+// ============================================================
+// BILIBILI
+// ============================================================
+
+/**
+ * B站 watch pages are single-page too, and the action toolbar is rebuilt on
+ * every part (分P) switch. A 1s URL poll keeps the Digest button alive without
+ * depending on B站's internal navigation events.
+ */
+function initBilibili() {
+  biliLastHref = window.location.href;
+  injectBilibiliDigestButton();
+
+  if (biliNavTimer) clearInterval(biliNavTimer);
+  biliNavTimer = setInterval(() => {
+    if (biliLastHref === window.location.href) {
+      if (!biliDigestButton || !biliDigestButton.isConnected) {
+        injectBilibiliDigestButton();
+      }
+      return;
+    }
+    biliLastHref = window.location.href;
+    injectBilibiliDigestButton();
+  }, 1000);
+}
+
+function isBilibiliVideoPage() {
+  return /\/video\/(BV[0-9A-Za-z]+|av\d+)/.test(window.location.pathname);
+}
+
+/**
+ * B站 has two usable hosts for the button:
+ *   1. the native action toolbar (点赞/投币/收藏/分享) — same spot as YouTube
+ *   2. a floating pill, used when the toolbar has not rendered (e.g. narrow
+ *      layout, 稍后再看 pages, or B站 A/B tests)
+ */
+function createBilibiliDigestButton(floating) {
+  const button = document.createElement("button");
+  button.id = "ytd-digest-button";
+  button.type = "button";
+  button.setAttribute("aria-label", "Open YouTube Digest");
+  button.textContent = "Digest";
+
+  const base = `
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: #c8674f;
+    color: #fff;
+    font-family: "PingFang SC", "Microsoft YaHei", "Roboto", sans-serif;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.2s, transform 0.1s;
+  `;
+
+  button.style.cssText = floating
+    ? `${base}
+       position: fixed;
+       right: 24px;
+       bottom: 140px;
+       z-index: 9999;
+       height: 40px;
+       padding: 0 20px;
+       border-radius: 20px;
+       box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);`
+    : `${base}
+       height: 30px;
+       padding: 0 14px;
+       margin-right: 8px;
+       border-radius: 6px;
+       flex: 0 0 auto;`;
+
+  button.addEventListener("mouseenter", () => {
+    button.style.background = "#b25742";
+  });
+  button.addEventListener("mouseleave", () => {
+    button.style.background = "#c8674f";
+  });
+  button.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    void openDigestPanel("Bilibili Digest");
+  });
+
+  return button;
+}
+
+function findBilibiliToolbar() {
+  const selectors = [
+    ".video-toolbar-left-main",
+    ".video-toolbar-left",
+    "#arc_toolbar_report .video-toolbar-left",
+    "#arc_toolbar_report",
+    ".video-toolbar-container",
+  ];
+  for (const selector of selectors) {
+    const node = document.querySelector(selector);
+    if (node) return node;
+  }
+  return null;
+}
+
+function injectBilibiliDigestButton() {
+  const existing = Array.from(document.querySelectorAll("#ytd-digest-button"));
+
+  if (!isBilibiliVideoPage()) {
+    existing.forEach((node) => node.remove());
+    biliDigestButton = null;
+    return false;
+  }
+
+  const toolbar = findBilibiliToolbar();
+  const wantFloating = !toolbar;
+  const connected = Boolean(biliDigestButton && biliDigestButton.isConnected);
+  const currentFloating =
+    connected && biliDigestButton.style.position === "fixed";
+
+  // Placement can change while the page renders (toolbar appears late), so
+  // rebuild the button when the mode differs instead of restyling in place.
+  if (!connected || currentFloating !== wantFloating) {
+    existing.forEach((node) => node.remove());
+    const button = createBilibiliDigestButton(wantFloating);
+    if (wantFloating) document.body.appendChild(button);
+    else toolbar.insertBefore(button, toolbar.firstChild);
+    biliDigestButton = button;
+    return true;
+  }
+
+  const host = wantFloating ? document.body : toolbar;
+  if (biliDigestButton.parentElement !== host) {
+    existing.forEach((node) => {
+      if (node !== biliDigestButton) node.remove();
+    });
+    if (wantFloating) host.appendChild(biliDigestButton);
+    else host.insertBefore(biliDigestButton, host.firstChild);
+  }
+
   return true;
 }
 
@@ -720,6 +923,8 @@ function showNoteSavedToast(note) {
  * These are just sitting in the HTML — we grab them from the DOM elements.
  */
 function extractVideoInfo() {
+  if (YTD_PAGE_SITE === "bilibili") return extractBilibiliVideoInfo();
+
   // The video title is in an h1 element inside the #title container
   const titleElement = document.querySelector(
     "h1.ytd-watch-metadata yt-formatted-string, #title h1 yt-formatted-string",
@@ -750,6 +955,47 @@ function extractVideoInfo() {
 }
 
 /**
+ * B站 metadata comes from the watch page DOM: the title lives in
+ * #viewbox_report, the uploader in the up-info card. Selectors are tried from
+ * newest to oldest layout because B站 reshuffles them between A/B tests.
+ */
+function extractBilibiliVideoInfo() {
+  const pick = (selectors) => {
+    for (const selector of selectors) {
+      const node = document.querySelector(selector);
+      const text = node?.textContent?.trim();
+      if (text) return text;
+    }
+    return "";
+  };
+
+  const video = document.querySelector("#bilibili-player video, video");
+
+  return {
+    title: pick([
+      "h1.video-title",
+      "#viewbox_report h1",
+      ".video-title",
+      ".video-info-title",
+    ]),
+    channelName: pick([
+      ".up-name",
+      ".up-info--name a",
+      ".up-info--name",
+      "#v_upinfo .up-name",
+      ".up-detail-top .up-name",
+    ]),
+    duration: video?.duration || 0,
+    description: pick([
+      ".desc-info-text",
+      "#v_desc .desc-info-text",
+      ".video-desc",
+      ".desc-info",
+    ]),
+  };
+}
+
+/**
  * 站点专属字幕元信息提取。
  * 返回当前站点、URL、以及用于获取平台原生字幕的关键标识。background 据此
  * 决定走哪条免费字幕通道，尽量不消耗 Supadata 额度。
@@ -768,6 +1014,185 @@ function extractPlatformSubtitleMeta() {
     result.videoId = YTD_SUBTITLE_SOURCES.extractVideoId(url);
   }
   return result;
+}
+
+// ============================================================
+// YOUTUBE FULL CAPTIONS (pot TOKEN)
+// ============================================================
+
+/**
+ * 当前 YouTube 视频 id。
+ */
+function currentYoutubeVideoId() {
+  try {
+    return new URL(window.location.href).searchParams.get("v") || "";
+  } catch (_e) {
+    return "";
+  }
+}
+
+/**
+ * 取一份"还能用"的 pot URL。
+ * 过期时间给 5 分钟：签名里的 expire 通常远大于这个值，但播放器换 P 或长时间
+ * 暂停后 token 会失效，保守一点直接重拿更稳。
+ */
+function usableCaptionPotUrl() {
+  if (!ytdCaptionPotUrl) return "";
+  if (Date.now() - ytdCaptionPotAt > 5 * 60 * 1000) return "";
+  const videoId = currentYoutubeVideoId();
+  try {
+    const u = new URL(ytdCaptionPotUrl);
+    if (videoId && u.searchParams.get("v") !== videoId) return "";
+  } catch (_e) {
+    return "";
+  }
+  return ytdCaptionPotUrl;
+}
+
+/**
+ * 等待 MAIN world 钩子送来新的 pot URL。
+ */
+function waitForCaptionPotUrl(timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (url) => {
+      if (done) return;
+      done = true;
+      resolve(url || "");
+    };
+    const timer = setTimeout(() => finish(""), timeoutMs);
+    ytdCaptionPotWaiters.push((url) => {
+      clearTimeout(timer);
+      finish(url);
+    });
+  });
+}
+
+/**
+ * 主动问一次 MAIN world：它可能在我们启动前就抓到过 URL。
+ */
+function pullCaptionPotUrl() {
+  return new Promise((resolve) => {
+    const id = Math.random().toString(36).slice(2);
+    let done = false;
+    const onMessage = (event) => {
+      if (event.source !== window) return;
+      const data = event.data;
+      if (!data || data.source !== "ytd-caption-pot") return;
+      if (data.type !== "url" || data.id !== id) return;
+      done = true;
+      window.removeEventListener("message", onMessage);
+      resolve(data.url || "");
+    };
+    window.addEventListener("message", onMessage);
+    window.postMessage({ source: "ytd-caption-pot", type: "get", id }, "*");
+    setTimeout(() => {
+      if (done) return;
+      window.removeEventListener("message", onMessage);
+      resolve("");
+    }, 1200);
+  });
+}
+
+/**
+ * 让播放器去请求一次字幕文件——它会自动带上 pot。
+ * 返回 true 表示字幕开关是我们打开的，抓完需要还原，避免打扰用户。
+ */
+function kickCaptionRequest() {
+  const button = document.querySelector(".ytp-subtitles-button");
+  if (!button) {
+    const player = document.getElementById("movie_player");
+    try {
+      player?.setOption?.("captions", "track", { languageCode: "zh" });
+    } catch (_e) {
+      /* noop */
+    }
+    return false;
+  }
+  if (button.getAttribute("aria-pressed") === "true") return false;
+  button.click();
+  return true;
+}
+
+function restoreCaptionState(wasOurs) {
+  if (!wasOurs) return;
+  const button = document.querySelector(".ytp-subtitles-button");
+  if (button && button.getAttribute("aria-pressed") === "true") {
+    try {
+      button.click();
+    } catch (_e) {
+      /* noop */
+    }
+  }
+}
+
+/**
+ * 选出最合适的目标语种：优先中文，其次是轨道列表里的第一个。
+ */
+function pickCaptionLang(currentLang, trackLangs) {
+  const langs = Array.isArray(trackLangs) ? trackLangs.filter(Boolean) : [];
+  const chinese = langs.find((l) => /^zh(-|$)/i.test(l));
+  if (chinese) return chinese;
+  if (currentLang) return currentLang;
+  return langs[0] || "";
+}
+
+/**
+ * 取 YouTube 全量字幕文本（json3）。
+ *
+ * 关键点：直接请求 captionTracks 的 baseUrl 会得到空的 200（缺 pot）。这里改用
+ * 播放器自己请求过的 URL —— 它带 pot —— 只把 lang 改成想要的语种、去掉 tlang。
+ * 签名参数 sparams 不含 lang/tlang，所以改写不会被拒绝。
+ *
+ * 返回 { success, text, lang, reason }。
+ */
+async function fetchYoutubeCaptionText(trackLangs) {
+  const videoId = currentYoutubeVideoId();
+  let url = usableCaptionPotUrl();
+  let weEnabled = false;
+
+  if (!url) {
+    weEnabled = kickCaptionRequest();
+    url = await waitForCaptionPotUrl(9000);
+    if (!url) url = await pullCaptionPotUrl();
+    // 播放器偶尔会比点击慢一拍，再等一小会儿。
+    if (!url) url = await waitForCaptionPotUrl(3000);
+  }
+
+  try {
+    if (!url) return { success: false, reason: "NO_POT_URL" };
+
+    const target = new URL(url);
+    const lang = pickCaptionLang(target.searchParams.get("lang"), trackLangs);
+    target.searchParams.set("fmt", "json3");
+    // tlang 是"翻译成某语言"，保留会拿到翻译版甚至空结果，去掉才能拿到原轨。
+    target.searchParams.delete("tlang");
+    if (lang) target.searchParams.set("lang", lang);
+
+    const resp = await fetch(target.toString(), { credentials: "include" });
+    const text = await resp.text();
+
+    // 空响应说明 pot 失效：把缓存清掉，让下次重新抓。
+    if (!text || text.length < 40) {
+      ytdCaptionPotUrl = "";
+      ytdCaptionPotAt = 0;
+      return { success: false, reason: "EMPTY", status: resp.status };
+    }
+
+    if (videoId) {
+      try {
+        const parsed = JSON.parse(text);
+        if (!Array.isArray(parsed.events) || !parsed.events.length) {
+          return { success: false, reason: "NO_EVENTS" };
+        }
+      } catch (_e) {
+        return { success: false, reason: "BAD_JSON" };
+      }
+    }
+    return { success: true, text, lang };
+  } finally {
+    restoreCaptionState(weEnabled);
+  }
 }
 
 /**
@@ -838,7 +1263,9 @@ function highlightKeyMoments(moments, videoDuration) {
  * which is the standard HTML5 way to seek in a video.
  */
 function seekToTimestamp(seconds) {
-  const video = document.querySelector("video.html5-main-video");
+  const video = document.querySelector(
+    "video.html5-main-video, #bilibili-player video, video",
+  );
   if (!video) {
     console.error("[YouTube Digest Content] No video element found for seek");
     return;
