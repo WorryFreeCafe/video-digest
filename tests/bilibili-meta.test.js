@@ -39,3 +39,47 @@ test("bilibili API and subtitle-file requests carry login cookies", () => {
   assert.doesNotMatch(background, /credentials:\s*"omit"/);
   assert.match(background, /credentials:\s*"include"/);
 });
+
+test("the Bilibili button never enters Bilibili's own DOM tree", () => {
+  const content = read("content.js");
+
+  // B站 的播放页由 Vue 接管 SSR 结果。把外来节点插进 .video-toolbar-left-main
+  // 这类受控容器，会让它的 patch 对不上节点列表，导致 UP 主头像、关注数、
+  // 右侧推荐封面都不渲染（关掉扩展即恢复）。按钮必须是挂在 body 上的浮层。
+  assert.doesNotMatch(content, /video-toolbar-left-main/);
+  assert.doesNotMatch(content, /toolbar\.insertBefore/);
+  assert.doesNotMatch(content, /findBilibiliToolbar/);
+
+  const inject = content.slice(
+    content.indexOf("function injectBilibiliDigestButton"),
+    content.indexOf("function scheduleDigestButtonReconciliation"),
+  );
+  assert.match(inject, /document\.body\.appendChild\(button\)/);
+  assert.match(inject, /if \(!isBilibiliVideoPage\(\)\)/);
+});
+
+test("the Bilibili button waits for hydration and stays out of fullscreen", () => {
+  const content = read("content.js");
+  const init = content.slice(
+    content.indexOf("function initBilibili"),
+    content.indexOf("function isBilibiliVideoPage"),
+  );
+
+  // document_idle 时 B站 的 hydration 还没结束，必须延后注入。
+  assert.match(init, /window\.addEventListener\("load", \(\) => setTimeout\(start, 700\)/);
+  assert.match(init, /setTimeout\(start, 700\)/);
+  // 全屏播放时浮层不该盖在视频上。
+  assert.match(init, /document\.fullscreenElement \? "none" : ""/);
+});
+
+test("the floating Bilibili button opens the side panel", () => {
+  const content = read("content.js");
+  const create = content.slice(
+    content.indexOf("function createBilibiliDigestButton"),
+    content.indexOf("function injectBilibiliDigestButton"),
+  );
+
+  assert.match(create, /void openDigestPanel\("Bilibili Digest"\)/);
+  assert.match(create, /button\.id = "ytd-digest-button"/);
+  assert.match(create, /position: fixed;/);
+});

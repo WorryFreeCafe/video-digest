@@ -33,6 +33,7 @@ let digestButtonResizeListenerAdded = false;
 let biliDigestButton = null;
 let biliNavTimer = null;
 let biliLastHref = "";
+let biliFullscreenListenerAdded = false;
 
 // 最近一次由播放器发出的、带 proof-of-origin token 的 timedtext URL。
 // 由 MAIN world 的 caption-pot-hook.js 通过 postMessage 送过来。没有 pot 的
@@ -429,19 +430,36 @@ async function openDigestPanel(label = "Digest") {
  */
 function initBilibili() {
   biliLastHref = window.location.href;
-  injectBilibiliDigestButton();
+
+  // 必须等 B站 自己完成 hydration 再动手。内容脚本在 document_idle 就开始跑，
+  // 那时 B站 的 Vue 还在接管 SSR 出来的 DOM；此刻插入节点会被它当成自己的
+  // 子节点去对比，进而把整块区域（UP 主头像 / 关注数 / 推荐封面）渲染坏。
+  const start = () => injectBilibiliDigestButton();
+  if (document.readyState === "complete") {
+    setTimeout(start, 700);
+  } else {
+    window.addEventListener("load", () => setTimeout(start, 700), { once: true });
+  }
 
   if (biliNavTimer) clearInterval(biliNavTimer);
   biliNavTimer = setInterval(() => {
-    if (biliLastHref === window.location.href) {
-      if (!biliDigestButton || !biliDigestButton.isConnected) {
-        injectBilibiliDigestButton();
-      }
+    const hrefChanged = biliLastHref !== window.location.href;
+    if (hrefChanged) biliLastHref = window.location.href;
+    // 浮层是独立的，正常情况下不用每次重建；这里只兜底两种情况：
+    // 站内跳转（含离开/进入视频页）和自己被页面清掉。
+    if (!hrefChanged && biliDigestButton && biliDigestButton.isConnected) {
       return;
     }
-    biliLastHref = window.location.href;
     injectBilibiliDigestButton();
   }, 1000);
+
+  if (!biliFullscreenListenerAdded) {
+    document.addEventListener("fullscreenchange", () => {
+      if (!biliDigestButton) return;
+      biliDigestButton.style.display = document.fullscreenElement ? "none" : "";
+    });
+    biliFullscreenListenerAdded = true;
+  }
 }
 
 function isBilibiliVideoPage() {
@@ -449,23 +467,31 @@ function isBilibiliVideoPage() {
 }
 
 /**
- * B站 has two usable hosts for the button:
- *   1. the native action toolbar (点赞/投币/收藏/分享) — same spot as YouTube
- *   2. a floating pill, used when the toolbar has not rendered (e.g. narrow
- *      layout, 稍后再看 pages, or B站 A/B tests)
+ * Builds the B站 Digest button.
+ *
+ * 它永远是挂在 <body> 上的独立浮层，不进入 B站 的任何容器：
+ * B站 的播放页是 Vue 接管 SSR 结果的，往播放页工具栏这类受控容器里
+ * 插一个外来子节点，会让它的 patch 逻辑对不上节点列表，
+ * 表现为 UP 主头像、关注数、右侧推荐封面都不渲染（关掉扩展就恢复）。
  */
-function createBilibiliDigestButton(floating) {
+function createBilibiliDigestButton() {
   const button = document.createElement("button");
   button.id = "ytd-digest-button";
   button.type = "button";
-  button.setAttribute("aria-label", "Open YouTube Digest");
+  button.setAttribute("aria-label", "Open Digest side panel");
   button.textContent = "Digest";
-
-  const base = `
+  button.style.cssText = `
+    position: fixed;
+    right: 24px;
+    bottom: 96px;
+    z-index: 2147483000;
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    height: 40px;
+    padding: 0 20px;
     border: none;
+    border-radius: 20px;
     background: #c8674f;
     color: #fff;
     font-family: "PingFang SC", "Microsoft YaHei", "Roboto", sans-serif;
@@ -473,25 +499,9 @@ function createBilibiliDigestButton(floating) {
     font-weight: 600;
     cursor: pointer;
     white-space: nowrap;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
     transition: background 0.2s, transform 0.1s;
   `;
-
-  button.style.cssText = floating
-    ? `${base}
-       position: fixed;
-       right: 24px;
-       bottom: 140px;
-       z-index: 9999;
-       height: 40px;
-       padding: 0 20px;
-       border-radius: 20px;
-       box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);`
-    : `${base}
-       height: 30px;
-       padding: 0 14px;
-       margin-right: 8px;
-       border-radius: 6px;
-       flex: 0 0 auto;`;
 
   button.addEventListener("mouseenter", () => {
     button.style.background = "#b25742";
@@ -508,21 +518,6 @@ function createBilibiliDigestButton(floating) {
   return button;
 }
 
-function findBilibiliToolbar() {
-  const selectors = [
-    ".video-toolbar-left-main",
-    ".video-toolbar-left",
-    "#arc_toolbar_report .video-toolbar-left",
-    "#arc_toolbar_report",
-    ".video-toolbar-container",
-  ];
-  for (const selector of selectors) {
-    const node = document.querySelector(selector);
-    if (node) return node;
-  }
-  return null;
-}
-
 function injectBilibiliDigestButton() {
   const existing = Array.from(document.querySelectorAll("#ytd-digest-button"));
 
@@ -532,32 +527,18 @@ function injectBilibiliDigestButton() {
     return false;
   }
 
-  const toolbar = findBilibiliToolbar();
-  const wantFloating = !toolbar;
-  const connected = Boolean(biliDigestButton && biliDigestButton.isConnected);
-  const currentFloating =
-    connected && biliDigestButton.style.position === "fixed";
-
-  // Placement can change while the page renders (toolbar appears late), so
-  // rebuild the button when the mode differs instead of restyling in place.
-  if (!connected || currentFloating !== wantFloating) {
-    existing.forEach((node) => node.remove());
-    const button = createBilibiliDigestButton(wantFloating);
-    if (wantFloating) document.body.appendChild(button);
-    else toolbar.insertBefore(button, toolbar.firstChild);
-    biliDigestButton = button;
-    return true;
-  }
-
-  const host = wantFloating ? document.body : toolbar;
-  if (biliDigestButton.parentElement !== host) {
+  if (biliDigestButton && biliDigestButton.isConnected) {
+    // 顺手清掉旧版本残留在页面里的按钮（旧版本会插进工具栏）。
     existing.forEach((node) => {
       if (node !== biliDigestButton) node.remove();
     });
-    if (wantFloating) host.appendChild(biliDigestButton);
-    else host.insertBefore(biliDigestButton, host.firstChild);
+    return true;
   }
 
+  existing.forEach((node) => node.remove());
+  const button = createBilibiliDigestButton();
+  document.body.appendChild(button);
+  biliDigestButton = button;
   return true;
 }
 

@@ -17,6 +17,13 @@ YouTube Digest 是一个需要自行提供 API Key 的开源项目，通过 GitH
 
 ![YouTube Digest 双语演示](YouTube%20Digest%20demo%20bilingual.png)
 
+## v1.3.2 更新
+
+- 修复装上扩展后 B 站播放页「UP 主头像 / 关注数 / 右侧推荐封面」加载不出来的问题。原因：Digest 按钮被插进了 B 站播放页工具栏（`.video-toolbar-left-main` / `#arc_toolbar_report`）。那些容器是 Vue 接管 SSR 结果的受控节点，插入外来子节点后它的 patch 对不上节点列表，整块区域就渲染失败，只有开着扩展时才会出现，关掉即恢复。
+- B 站按钮改为挂在 `<body>` 上的独立浮层（`position: fixed`，右下角），完全不进入 B 站自己的 DOM 树；全屏播放时自动隐藏，不再盖住视频。
+- 注入时机改为页面 `load` 之后延后 700ms，避开 B 站 hydration 窗口期。
+- 新增回归测试，锁定「B 站按钮不得插入 B 站容器」这条约束。
+
 ## v1.3.1 更新
 
 - 修复 YouTube 字幕只拿到一两句的问题：YouTube 现在要求 `/api/timedtext` 带 proof-of-origin token（`pot`），没有 pot 时接口返回 **HTTP 200 但响应体为空**，旧代码只看状态码，误判成"有字幕但内容为空"，最后掉进 30 秒 Whisper 兜底。

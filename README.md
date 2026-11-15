@@ -15,6 +15,21 @@ YouTube Digest is a bring-your-own-key project installed locally from GitHub. It
 
 ![YouTube Digest demo](YouTube%20Digest%20demo.png)
 
+## What is new in v1.3.2
+
+- Fixed a Bilibili regression: the UP avatar, follower count and the related
+  video covers on the right stopped rendering while the extension was enabled.
+  The Digest button used to be inserted into Bilibili's action toolbar
+  (`.video-toolbar-left-main` / `#arc_toolbar_report`). Those containers are
+  Vue-hydrated, and an extra child desynchronises its patch pass, leaving the
+  surrounding blocks unrendered, which is why disabling the extension fixed it.
+- The Bilibili button is now a fixed overlay appended to `<body>`, outside
+  Bilibili's DOM tree entirely. It hides itself in fullscreen so it never covers
+  the video.
+- Injection is deferred to 700ms after `load`, outside Bilibili's hydration
+  window.
+- Added regression tests that keep the button out of Bilibili's containers.
+
 ## What is new in v1.3.1
 
 - Fixed YouTube transcripts arriving as one or two sentences. YouTube now
