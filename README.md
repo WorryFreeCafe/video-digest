@@ -15,6 +15,22 @@ YouTube Digest is a bring-your-own-key project installed locally from GitHub. It
 
 ![YouTube Digest demo](YouTube%20Digest%20demo.png)
 
+## What is new in v1.3.3
+
+- Reduced idle cost on YouTube. The note button retry loop used to be re-armed
+  by every page mutation, which reset its attempt budget and turned the
+  "give up after 3 seconds" guard into a permanent 10 queries per second scan on
+  pages that mutate continuously.
+- Toolbar reconciliation is now rate limited to one pass per 400ms, and exits
+  after a single geometry read while the button is still mounted in a visible
+  host, instead of a full `querySelectorAll` plus `getComputedStyle` sweep on
+  every mutation burst.
+- The note button's hover state only writes style when it actually changes.
+- Bilibili's 1 second navigation poll no longer queries the DOM when there is
+  nothing to repair, so non-video pages stay untouched.
+- Measured on one Bilibili watch page, playing: the extension accounts for about
+  0.3 percentage points of script time and 1.7 points of main-thread task time.
+
 ## What is new in v1.3.2
 
 - Fixed a Bilibili regression: the UP avatar, follower count and the related

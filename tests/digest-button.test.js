@@ -105,6 +105,7 @@ function createHarness() {
   const observers = [];
   const timers = new Map();
   let nextTimerId = 1;
+  const stats = { setIntervalCalls: 0, clearIntervalCalls: 0, queryCounts: {} };
 
   const document = {
     readyState: "loading",
@@ -113,6 +114,7 @@ function createHarness() {
       documentListeners[type] = listener;
     },
     querySelectorAll(selector) {
+      stats.queryCounts[selector] = (stats.queryCounts[selector] || 0) + 1;
       if (selector === "ytd-watch-metadata #actions-inner") return actionRows;
       if (selector === "#ytd-digest-button") {
         return elements.filter(
@@ -165,8 +167,9 @@ function createHarness() {
       }
       observe() {}
     },
-    setTimeout(callback) {
+    setTimeout(callback, delay) {
       const id = nextTimerId++;
+      stats.lastTimeoutDelay = delay;
       timers.set(id, callback);
       return id;
     },
@@ -174,9 +177,12 @@ function createHarness() {
       timers.delete(id);
     },
     setInterval() {
+      stats.setIntervalCalls++;
       return nextTimerId++;
     },
-    clearInterval() {},
+    clearInterval() {
+      stats.clearIntervalCalls++;
+    },
   });
 
   vm.runInContext(contentScript, context);
@@ -189,6 +195,7 @@ function createHarness() {
     documentListeners,
     windowListeners,
     observers,
+    stats,
     flushTimers() {
       const callbacks = Array.from(timers.values());
       timers.clear();
@@ -332,4 +339,49 @@ test("DOM mutation reconciliation repairs a replaced toolbar", () => {
   assert.equal(oldGroup.children.length, 0);
   assert.equal(newRow.children.length, 1);
   assert.equal(newGroup.children.length, 1);
+});
+
+test("mutation storms do not re-arm the note button retry loop", () => {
+  const harness = createHarness();
+  // No player container in this harness, so the retry loop must arm exactly once.
+  harness.context.init();
+  assert.equal(harness.stats.setIntervalCalls, 1);
+
+  for (let i = 0; i < 40; i += 1) harness.observers[0].callback([]);
+
+  // Re-arming per mutation used to reset the attempt budget, so the loop never
+  // reached its "give up after ~3s" branch and kept querying the player forever.
+  assert.equal(harness.stats.setIntervalCalls, 1);
+  assert.equal(harness.stats.clearIntervalCalls, 0);
+});
+
+test("reconciliation is rate limited between mutation bursts", () => {
+  const harness = createHarness();
+  const { row } = createActionRow({ width: 500, height: 36 });
+  harness.actionRows.push(row);
+  harness.context.setupButtonObserver();
+
+  harness.observers[0].callback([]);
+  assert.ok(harness.stats.lastTimeoutDelay <= 80);
+  harness.flushTimers();
+
+  harness.observers[0].callback([]);
+  assert.ok(
+    harness.stats.lastTimeoutDelay >= 300,
+    `expected the min-gap delay, got ${harness.stats.lastTimeoutDelay}`,
+  );
+});
+
+test("idle reconcile returns before re-scanning the toolbar", () => {
+  const harness = createHarness();
+  const { row } = createActionRow({ width: 500, height: 36 });
+  harness.actionRows.push(row);
+
+  assert.equal(harness.context.injectDigestButton(), true);
+  const before = harness.stats.queryCounts["#ytd-digest-button"] || 0;
+
+  assert.equal(harness.context.injectDigestButton(), true);
+  const after = harness.stats.queryCounts["#ytd-digest-button"] || 0;
+
+  assert.equal(after, before, "healthy button must not trigger another scan");
 });

@@ -23,6 +23,7 @@ const debugLog = (...args) => {
 // ============================================================
 
 let ytdNoteButton = null;
+let ytdNoteButtonVisible = false;
 let ytdNoteButtonTimer = null;
 let ytdNoteKeyboardListenerAdded = false;
 let ytdNoteButtonRetryTimer = null;
@@ -30,6 +31,12 @@ let ytdDigestButton = null;
 let digestButtonObserver = null;
 let digestButtonReconcileTimer = null;
 let digestButtonResizeListenerAdded = false;
+
+// Reconcile rate limit. YouTube mutates the watch page several times a second
+// during playback, so an unbounded debounce still meant a full toolbar scan
+// every 80ms. 400ms keeps the button responsive without the churn.
+const DIGEST_RECONCILE_MIN_GAP_MS = 400;
+let digestButtonLastReconcileAt = 0;
 let biliDigestButton = null;
 let biliNavTimer = null;
 let biliLastHref = "";
@@ -105,11 +112,13 @@ function init() {
 function tryInjectNoteButton() {
   if (!window.location.pathname.includes("/watch")) return;
 
-  // Clear any existing retry so we don't stack timers
-  if (ytdNoteButtonRetryTimer) {
-    clearInterval(ytdNoteButtonRetryTimer);
-    ytdNoteButtonRetryTimer = null;
-  }
+  // Two cheap exits before doing any DOM work. Both matter because this
+  // function is called from the body-wide MutationObserver: YouTube rewrites
+  // its time label several times a second, and re-arming the retry loop on
+  // every one of those mutations used to reset the attempt budget, turning the
+  // "give up after ~3s" guard into a permanent 10 queries/second scan.
+  if (ytdNoteButton && ytdNoteButton.isConnected) return;
+  if (ytdNoteButtonRetryTimer) return; // a retry loop is already running
 
   let attempts = 0;
   const maxAttempts = 30; // ~3 seconds of retrying
@@ -258,6 +267,21 @@ function isVisibleDigestHost(element) {
 }
 
 /**
+ * Cheap "is our button still sitting somewhere usable" probe.
+ *
+ * Deliberately stops at the geometry check: the host we care about is the
+ * native button group, and YouTube's hidden responsive copies are 0x0. Reading
+ * only the parent's rect keeps the typical reconciliation at one layout read.
+ */
+function isMountedInVisibleHost(button) {
+  if (!button || !button.isConnected) return false;
+  const host = button.parentElement;
+  if (!host || !host.isConnected) return false;
+  const rect = host.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+
+/**
  * YouTube keeps hidden copies of its responsive action toolbar in the DOM.
  * querySelector() can return one of those 0x0 copies before the toolbar the
  * viewer can actually see, so inspect every candidate and resolve the native
@@ -356,15 +380,23 @@ function createDigestButton() {
  * during navigation and at responsive breakpoints.
  */
 function injectDigestButton() {
-  const existingButtons = Array.from(
-    document.querySelectorAll("#ytd-digest-button"),
-  );
-
   if (!window.location.pathname.includes("/watch")) {
-    existingButtons.forEach((button) => button.remove());
+    document
+      .querySelectorAll("#ytd-digest-button")
+      .forEach((button) => button.remove());
     ytdDigestButton = null;
     return false;
   }
+
+  // Fast path for the common case: our button is still mounted inside a host
+  // that has real geometry. Costs one getBoundingClientRect instead of the
+  // full scan below (querySelectorAll + a rect + getComputedStyle per
+  // candidate), which is what this function did on every DOM mutation burst.
+  if (isMountedInVisibleHost(ytdDigestButton)) return true;
+
+  const existingButtons = Array.from(
+    document.querySelectorAll("#ytd-digest-button"),
+  );
 
   const actionsContainer = findDigestButtonHost();
   if (!actionsContainer) {
@@ -445,11 +477,15 @@ function initBilibili() {
   biliNavTimer = setInterval(() => {
     const hrefChanged = biliLastHref !== window.location.href;
     if (hrefChanged) biliLastHref = window.location.href;
-    // 浮层是独立的，正常情况下不用每次重建；这里只兜底两种情况：
-    // 站内跳转（含离开/进入视频页）和自己被页面清掉。
-    if (!hrefChanged && biliDigestButton && biliDigestButton.isConnected) {
-      return;
+
+    if (!hrefChanged) {
+      // 没有站内跳转时只有两种情况要做事：按钮被页面清掉了（重建），或者
+      // 首次注入还没成功（继续尝试）。其余情况直接返回，省掉每秒一次的
+      // querySelectorAll —— B站首页、搜索页也注入了这个脚本，那里无需任何工作。
+      if (biliDigestButton && biliDigestButton.isConnected) return;
+      if (!biliDigestButton && !isBilibiliVideoPage()) return;
     }
+
     injectBilibiliDigestButton();
   }, 1000);
 
@@ -542,15 +578,22 @@ function injectBilibiliDigestButton() {
   return true;
 }
 
+/**
+ * Debounced reconcile. YouTube mutates its watch page continuously (time
+ * label, view count, comments), so this is rate limited as well as debounced:
+ * a steady mutation stream can no longer turn into a reconcile every 80ms.
+ */
 function scheduleDigestButtonReconciliation(delay = 80) {
-  if (digestButtonReconcileTimer) {
-    clearTimeout(digestButtonReconcileTimer);
-  }
+  if (digestButtonReconcileTimer) return; // one pending reconcile is enough
+
+  const sinceLast = Date.now() - digestButtonLastReconcileAt;
+  const wait = Math.max(delay, DIGEST_RECONCILE_MIN_GAP_MS - sinceLast);
 
   digestButtonReconcileTimer = setTimeout(() => {
     digestButtonReconcileTimer = null;
+    digestButtonLastReconcileAt = Date.now();
     injectDigestButton();
-  }, delay);
+  }, wait);
 }
 
 function setupDigestButtonResizeListener() {
@@ -672,6 +715,7 @@ function injectNoteButton() {
   `;
 
   ytdNoteButton = noteButton;
+  ytdNoteButtonVisible = false;
 
   // Show button when mouse enters or moves over the player.
   // Hide after 2 seconds of idle or when the mouse leaves.
@@ -717,13 +761,15 @@ function injectNoteButton() {
 }
 
 function showNoteButton() {
-  if (!ytdNoteButton) return;
+  if (!ytdNoteButton || ytdNoteButtonVisible) return;
+  ytdNoteButtonVisible = true;
   ytdNoteButton.style.opacity = "1";
   ytdNoteButton.style.pointerEvents = "auto";
 }
 
 function hideNoteButton() {
-  if (!ytdNoteButton) return;
+  if (!ytdNoteButton || !ytdNoteButtonVisible) return;
+  ytdNoteButtonVisible = false;
   ytdNoteButton.style.opacity = "0";
   ytdNoteButton.style.pointerEvents = "none";
 }
