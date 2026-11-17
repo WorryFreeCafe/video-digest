@@ -15,6 +15,21 @@ YouTube Digest is a bring-your-own-key project installed locally from GitHub. It
 
 ![YouTube Digest demo](YouTube%20Digest%20demo.png)
 
+## What is new in v1.3.4
+
+- Removed the Supadata integration entirely. Transcripts now come from two
+  sources only: the platform's own caption track, or your local Whisper server.
+- Supadata was a paid proxy for captions that already existed. It could not
+  transcribe a video that had no captions (`mode=native` returns `206`), and the
+  one thing it did cover, YouTube's token-signed `timedtext` endpoint, is now
+  handled inside the extension by `caption-pot-hook.js`.
+- The Settings page no longer asks for a transcript key, and the extension no
+  longer requests host access to `api.supadata.ai`.
+- Fixed a gate in the side panel that refused to open unless a Supadata key was
+  stored, even for videos whose captions were available locally.
+- Saving a note without a cached transcript now asks you to reload the digest
+  instead of silently re-downloading captions in the background.
+
 ## What is new in v1.3.3
 
 - Reduced idle cost on YouTube. The note button retry loop used to be re-armed
@@ -68,7 +83,7 @@ YouTube Digest is a bring-your-own-key project installed locally from GitHub. It
 ## What is new in v1.3.0
 
 - The side panel now works on Bilibili: watch pages get a Digest button that uses
-  the free native subtitle track, with no Supadata spend.
+  the free native subtitle track, with no third-party transcript service.
 - Fixed `Extension has not been invoked` no matter how often the icon was
   clicked: the manifest now declares `activeTab`, and the action click opens the
   panel itself (Chrome's `openPanelOnActionClick` swallows the click, so the
@@ -97,7 +112,7 @@ You do not need to understand the code or use the command line. Send this messag
 Your agent should:
 
 1. Ask where you want to keep the project, download or clone it there, and tell you the exact full path. If you want a suggestion, it can offer `~/Documents/youtube-digest` on macOS or Linux, or `%USERPROFILE%\Documents\youtube-digest` on Windows.
-2. Open the official Supadata and DeepSeek pages below and help you create your own accounts.
+2. Open the official DeepSeek API Keys page below and help you create your own account.
 3. Walk you through selecting the exact project folder you chose in Chrome with **Load unpacked**.
 4. Show you where to enter your API keys in the extension's **Settings** page.
 5. Open a YouTube video with captions and confirm the transcript and translation work.
@@ -123,20 +138,7 @@ Because this is an unpacked extension, it does not update automatically. After d
 
 ## Set up your API keys
 
-YouTube Digest needs two keys under your own provider accounts:
-
-1. A **Supadata API key** to retrieve YouTube transcripts.
-2. A **DeepSeek API key** for overviews, explanations, translation, and automatic note polishing.
-
-### Get a Supadata API key
-
-1. Open the official [Supadata sign-up page](https://dash.supadata.ai/auth/sign-up).
-2. Create an account and complete the short onboarding flow.
-3. Supadata generates an API key automatically during onboarding.
-4. Open the [Supadata dashboard](https://dash.supadata.ai/) whenever you need to find or manage the key.
-5. Copy the key and paste it into **Supadata API key** in YouTube Digest Settings.
-
-See the [official Supadata documentation](https://docs.supadata.ai/) if the dashboard flow changes.
+YouTube Digest needs one key under your own provider account: a **DeepSeek API key** for overviews, explanations, translation, and automatic note polishing. Transcripts themselves need no key, because they are read from the page or produced by your own machine.
 
 ### Get a DeepSeek API key
 
@@ -175,7 +177,7 @@ Keys and settings are stored in Chrome's local extension storage on your device.
 
 - Google Chrome 116 or newer, using the Side Panel API.
 - Standard `youtube.com/watch` video pages.
-- Native subtitle tracks returned by Supadata. YouTube Digest prefers English when available, but may show another native language.
+- Platform-native subtitle tracks read directly from the page: YouTube `captionTracks` (including the signed `timedtext` URL the player itself uses) and Bilibili's subtitle API. No third-party transcript service is involved.
 - Original, Simplified Chinese, and aligned bilingual transcript views.
 - AI overviews, selected-text explanations, translation, and automatic note polishing.
 - Local notes and a local cache for recent transcript and digest results.
@@ -183,29 +185,30 @@ Keys and settings are stored in Chrome's local extension storage on your device.
 
 Shorts, live streams, private or access-restricted videos, and videos without an available native transcript may not work. Firefox, Safari, mobile browsers, and other Chromium browsers are not currently tested or supported.
 
-## Subtitle source routing (three scenarios)
+## Subtitle source routing (two scenarios)
 
-YouTube Digest now routes subtitle retrieval by availability, so it does not
-blindly spend a Supadata credit on every video:
+YouTube Digest routes subtitle retrieval by availability. There is no metered
+transcript service in the loop, so a failed probe costs nothing:
 
-1. **Platform-native subtitles (free, no Supadata).** The extension first probes
-   for native captions on the current page - YouTube `captionTracks`, Bilibili's
-   free subtitle API, or generic HTML5 `video.textTracks`. If found, the text is
-   used directly for the digest, spending **zero** Supadata credits.
+1. **Platform-native subtitles.** The extension probes for native captions on the
+   current page: YouTube `captionTracks`, Bilibili's free subtitle API, or a
+   generic HTML5 `video.textTracks`. YouTube's `timedtext` endpoint now requires a
+   proof-of-origin token and answers `HTTP 200` with an empty body when the token
+   is missing. `caption-pot-hook.js` records the signed URL the player itself
+   requests, so the content script can download the full track with its real
+   timeline. Bilibili's API needs a signed-in session; when logged out it returns
+   nothing.
 
-2. **No native subtitle → local Whisper transcription (optional).** If no
+2. **No native subtitle, local Whisper transcription (optional).** If no
    platform caption exists and you enable **Local Whisper** in Settings, the
    extension captures the tab's current audio (via `chrome.tabCapture`, which
-   works for cross-origin players) and sends it to a local [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
-   service (`whisper/whisper_server.py`). Transcription happens on your machine
-   and does not touch Supadata.
+   works for cross-origin players) and sends it to a local
+   [faster-whisper](https://github.com/SYSTRAN/faster-whisper) service
+   (`whisper/whisper_server.py`). Transcription happens on your machine and never
+   leaves it.
 
-3. **Manual Supadata fallback.** Supadata is no longer auto-called. When neither
-   a native caption nor an enabled Whisper fallback is available, the side panel
-   shows a manual **Use Supadata (fallback)** action so you can spend a credit
-   only when you choose to.
-
-Supadata remains available, but it is opt-in rather than the default path.
+If neither path produces text, the panel says so and points at the Whisper
+setting. It does not silently upload your video URL anywhere.
 
 ### Run the local Whisper server (optional)
 
@@ -236,19 +239,52 @@ Two practical notes:
   invocation. Without that permission every click fails with the same error, so
   keep it in `permissions`.
 
-## Supadata free tier and request costs
+## Roadmap: cloud transcription with Groq (not implemented)
 
-Current as of August 9, 2026, the [Supadata pricing page](https://supadata.ai/pricing) lists a free tier with **100 credits per month**, no credit card required. Unused credits do not roll over. Supadata pricing can change, so check the current page before relying on these numbers.
+The extension no longer calls a transcript API, so the only way to handle a video
+with no captions is local Whisper, which currently records 5 to 120 seconds of
+the playing tab. That is enough to sample a video, not to digest it. The planned
+fix is an opt-in cloud path using [Groq](https://groq.com/) rather than a
+transcript vendor, because Groq transcribes audio instead of proxying captions.
 
-The [Supadata transcript documentation](https://docs.supadata.ai/get-transcript) describes the transcript request modes and credit behavior:
+Why Groq:
 
-- A native transcript request uses **1 credit**, regardless of video duration.
-- A generated transcript costs **2 credits per video minute**. YouTube Digest does not use this path because it forces `mode=native`.
-- An unavailable native lookup returned as HTTP `206` still uses **1 credit**.
+- `whisper-large-v3-turbo` is listed at **$0.04 per hour of audio** (about
+  $0.013 for a 20-minute video, $0.04 for an hour), with a 10 second minimum per
+  request. `whisper-large-v3` is $0.111 per hour if accuracy matters more.
+- It runs around 216x real time, so a 20-minute video returns in seconds.
+- It speaks the OpenAI audio API shape (`POST /openai/v1/audio/transcriptions`
+  with `model`, `file`, `response_format=verbose_json`), so the existing
+  `fetch`-based code needs no SDK.
 
-With the current native-only behavior, the free tier can cover roughly 100 transcript lookups per month when each request succeeds once. Retries and unavailable-caption lookups also consume credits, so actual successful-video coverage can be lower.
+Implementation sketch:
 
-DeepSeek usage is separate from Supadata. YouTube Digest does not collect payments or resell access. Set spending limits and monitor both accounts.
+1. Settings: add `transcriptionProvider: "local" | "groq"`, `groqApiKey`, and
+   `groqModel` (default `whisper-large-v3-turbo`). Keep the key in
+   `chrome.storage.local` like the DeepSeek key, and never auto-select Groq.
+2. Capture: `handleCaptureAudioTranscribe` already owns the tab-capture path.
+   Lift its 5 to 120 second clamp into a per-request option and record the whole
+   track while it plays, or chunk the `MediaRecorder` output into segments under
+   25 MB (roughly an hour of compressed speech) and upload them in order.
+3. Transcribe: send each chunk with `response_format=verbose_json` and offset the
+   returned segment timestamps by the chunk start. Reuse
+   `YTD_SUBTITLE_SOURCES.buildTranscriptFromChunks` so the panel, seek, notes, and
+   translation keep working unchanged.
+4. Gate it: keep the current rule that nothing is spent without an explicit
+   click. Show the estimated audio length and cost before the request.
+5. Cache: store the result under the same `digest_<videoId>` key and bump
+   `DIGEST_CACHE_VERSION`, so switching providers does not serve a 30 second
+   sample as if it were a full transcript.
+
+Known constraints: 25 MB per upload on the base tier (100 MB on the dev tier),
+10 second minimum billing, no diarization, and DRM or encrypted streams remain
+uncapturable. Audio leaves your machine, so the README and the Settings page must
+say so next to the toggle.
+
+Other audio APIs, priced per hour of audio for comparison: OpenAI
+`gpt-4o-mini-transcribe` about $0.18, `whisper-1` about $0.36, AssemblyAI
+Universal-2 about $0.15, Deepgram Nova-3 about $0.26. Groq is the cheapest of
+that group by a wide margin.
 
 ## DeepSeek V4 Flash pricing
 
@@ -291,12 +327,12 @@ If you want another AI provider or model, first open the exact YouTube Digest pr
 
 YouTube Digest makes provider requests directly from the extension:
 
-1. It sends a canonical YouTube watch URL to Supadata to request the native transcript.
+1. It reads captions from the page you already have open, or records that tab's audio and sends it to the local Whisper server you configured. Subtitle retrieval never leaves your machine.
 2. It sends the transcript and relevant video metadata to DeepSeek when you request AI features.
 3. Focused features send only the content they need, such as selected text with context or small transcript batches for translation.
 4. It stores keys, settings, notes, and recent cache entries locally in Chrome.
 
-There is no YouTube Digest account system, advertising, analytics, or telemetry. Supadata and DeepSeek still receive data under their own terms and privacy policies. See [PRIVACY.md](PRIVACY.md) for details.
+There is no YouTube Digest account system, advertising, analytics, or telemetry. DeepSeek still receives data under its own terms and privacy policy. See [PRIVACY.md](PRIVACY.md) for details.
 
 ## Troubleshooting
 
@@ -317,9 +353,8 @@ There is no YouTube Digest account system, advertising, analytics, or telemetry.
 
 ### YouTube Digest asks for setup
 
-- Open **Settings** and save a DeepSeek key. A Supadata key is only required if
-  you want the manual Supadata fallback; with platform-native subtitles or an
-  enabled local Whisper fallback, Supadata is optional.
+- Open **Settings** and save a DeepSeek key. That is the only key this extension
+  asks for.
 - This published version uses the fixed DeepSeek V4 Flash endpoint and model. There are no Base URL or Model fields to configure.
 - If Settings says a legacy custom provider was removed, enter a DeepSeek key. The old AI key was cleared so it could not be reused with the wrong service.
 
@@ -329,12 +364,9 @@ There is no YouTube Digest account system, advertising, analytics, or telemetry.
 - If you did not enable **Local Whisper** in Settings, the extension does not
   transcribe audio on its own. Enable it (and start `whisper/whisper_server.py`)
   to get an audio-transcription fallback.
-- When you do use the manual Supadata fallback, remember that unavailable native
-  lookups and manual retries may still consume credits.
-
-The extension will not auto-spend Supadata credits when a native caption is
-missing; it either uses a platform caption, your local Whisper fallback, or
-asks you to choose before any paid lookup.
+Caption retrieval never uses a paid service, so retries cost nothing. If the
+platform track is missing and Whisper is off, enable it and start
+`whisper/whisper_server.py`; there is no cloud fallback to fall back to.
 
 ### AI requests fail
 

@@ -1,12 +1,10 @@
 /**
  * subtitle-sources.js — 字幕来源路由模块（Service Worker / Content 共用）
  *
- * 负责"先本地探测、再按来源取字幕"的统一编排，避免一上来就调用 Supadata
- * 浪费额度。来源优先级：
+ * 负责"先本地探测、再按来源取字幕"的统一编排。来源优先级：
  *   1. platform  — 平台原生字幕（YouTube captionTracks / B站字幕接口 /
- *                 通用 HTML5 <track> 与 video.textTracks），免费、零额度消耗
+ *                 通用 HTML5 <track> 与 video.textTracks），免费
  *   2. whisper   — 无原生字幕时，捕获视频音频走本地 faster-whisper 服务转录
- *   3. supadata  — 手动兜底（保留原 Supadata 流程，仅当用户明确选择时使用）
  *
  * 该文件同时被 background.js（importScripts）和 content.js（content_scripts
  * 注入）加载，因此内部用全局命名空间挂载，不含任何 DOM 直接依赖；DOM 相关
@@ -127,7 +125,7 @@ var YTD_SUBTITLE_SOURCES = (() => {
 
   /**
    * 统一构造"来源"返回对象，供 background 直接 sendResponse。
-   * @param {"platform"|"whisper"|"supadata"} source
+   * @param {"platform"|"whisper"|"none"} source
    * @param {Object} payload
    */
   function sourceResult(source, payload = {}) {

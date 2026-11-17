@@ -21,7 +21,7 @@ test("manifest uses minimized install-time permissions", () => {
   assert.ok(manifest.permissions.includes("tabCapture"));
   assert.ok(manifest.host_permissions.includes("https://api.deepseek.com/*"));
   assert.equal(Object.hasOwn(manifest, "optional_host_permissions"), false);
-  assert.equal(manifest.version, "1.3.3");
+  assert.equal(manifest.version, "1.3.4");
 });
 
 test("release copy documents current scope without em dashes", () => {
@@ -89,15 +89,6 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(chineseReadme, /不接受上游 Issue 或 Pull Request/);
   assert.match(chineseReadme, /增加更多翻译语言/);
 
-  assert.match(readme, /100 credits per month/i);
-  assert.match(readme, /native transcript request uses \*\*1 credit\*\*/i);
-  assert.match(readme, /generated transcript costs \*\*2 credits per video minute\*\*/i);
-  assert.match(readme, /HTTP `206` still uses \*\*1 credit\*\*/i);
-  assert.match(readme, /forces `mode=native`/i);
-  assert.match(readme, /roughly 100 transcript lookups per month/i);
-  assert.match(readme, /supadata\.ai\/pricing/i);
-  assert.match(readme, /docs\.supadata\.ai\/get-transcript/i);
-  assert.match(readme, /dash\.supadata\.ai\/auth\/sign-up/i);
   assert.match(readme, /platform\.deepseek\.com\/api_keys/i);
   assert.match(readme, /api-docs\.deepseek\.com/i);
   assert.match(readme, /api-docs\.deepseek\.com\/quick_start\/pricing/i);
@@ -118,7 +109,6 @@ test("release copy documents current scope without em dashes", () => {
   assert.match(chineseReadme, /32,600 \u4e2a\u8f93\u5165 token/);
   assert.match(chineseReadme, /\$0\.003[^\n]*\$0\.010 USD/);
   assert.match(chineseReadme, /\$0\.005[^\n]*\$0\.020 USD/);
-  assert.match(chineseReadme, /dash\.supadata\.ai\/auth\/sign-up/i);
   assert.match(chineseReadme, /platform\.deepseek\.com\/api_keys/i);
   assert.match(readme, /^### The Digest button is missing on a YouTube video$/m);
   assert.match(
@@ -129,8 +119,26 @@ test("release copy documents current scope without em dashes", () => {
   const optionsPage = read("options.html");
   const optionsStyles = read("options.css");
   const optionsScript = read("options.js");
-  assert.match(optionsPage, /dash\.supadata\.ai\/auth\/sign-up/i);
   assert.match(optionsPage, /platform\.deepseek\.com\/api_keys/i);
+  // The removal is documented in the v1.3.4 changelog, so only the copy below
+  // that section has to be free of the vendor name.
+  const readmeAfterChangelog = readme.slice(
+    readme.indexOf("## What is new in v1.3.3"),
+  );
+  assert.doesNotMatch(
+    [readmeAfterChangelog, optionsPage, optionsScript].join("\n"),
+    /supadata/i,
+    "Supadata must be fully removed from settings and current documentation",
+  );
+  assert.match(readme, /Removed the Supadata integration entirely/);
+  assert.equal(
+    manifest.host_permissions.some((host) => /supadata/i.test(host)),
+    false,
+    "The Supadata host permission must be gone",
+  );
+  assert.match(readme, /^## Roadmap: cloud transcription with Groq \(not implemented\)$/m);
+  assert.match(readme, /whisper-large-v3-turbo/);
+  assert.match(readme, /\$0\.04 per hour of audio/i);
   assert.doesNotMatch(optionsPage, /<select\b/i);
   assert.doesNotMatch(optionsPage, /id="(?:provider|aiBaseUrl|aiModel)"/);
   const detailsTag = optionsPage.match(

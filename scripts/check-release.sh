@@ -251,7 +251,7 @@ const fs = require("fs");
 const patterns = [
   ["private key block", /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g],
   ["OpenAI-style key", /\bsk-[A-Za-z0-9_-]{20,}\b/g],
-  ["Supadata-style key", /\bsd_[A-Za-z0-9_-]{16,}\b/g],
+  ["sd_ prefixed API key", /\bsd_[A-Za-z0-9_-]{16,}\b/g],
   ["GitHub token", /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b/g],
   ["GitHub fine-grained token", /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g],
   ["Google API key", /\bAIza[0-9A-Za-z_-]{30,}\b/g],

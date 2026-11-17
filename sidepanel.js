@@ -21,7 +21,7 @@ let currentTranscript = null;
 let currentTranscriptText = null; // Plain text (for display/export)
 let currentTranscriptTimestamped = null; // With timestamps for AI analysis
 let currentTranscriptLanguage = null;
-let currentTranscriptSource = null; // "platform" | "whisper" | "supadata" | "none"
+let currentTranscriptSource = null; // "platform" | "whisper" | "none"
 let currentVideoTitle = "";
 let currentChannelName = "";
 let currentVideoDescription = "";
@@ -173,7 +173,7 @@ function splitOversizedThought(text, maxChars) {
 /**
  * Reconstructs complete sentences across raw caption boundaries. Each segment
  * keeps the timestamp of the first caption that contributed text. Character
- * and time limits prevent a malformed Supadata entry from becoming one giant
+ * and time limits prevent a malformed caption entry from becoming one giant
  * row while punctuation remains the preferred boundary.
  */
 function groupTranscriptEntries(entries, limits = TRANSCRIPT_SEGMENT_LIMITS) {
@@ -272,7 +272,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     action: "checkConfig",
   });
 
-  if (!configStatus.hasSupadataKey || !configStatus.hasAiKey) {
+  if (!configStatus.hasAiKey) {
     showConfigError(configStatus);
     return;
   }
@@ -730,8 +730,7 @@ async function startDigest(videoId, videoUrl, tabId) {
   showState("loading");
   updateLoading("Detecting subtitle source", "");
 
-  // 字幕预检编排：优先平台原生字幕（免费）→ Whisper → 提示兜底。
-  // 默认不再自动调用 Supadata，避免无字幕视频白白消耗额度。
+  // 字幕预检编排：优先平台原生字幕（免费）→ 本地 Whisper → 提示。
   const transcriptResult = await chrome.runtime.sendMessage({
     action: "fetchTranscriptSmart",
     videoId: videoId,
@@ -752,13 +751,6 @@ async function startDigest(videoId, videoUrl, tabId) {
       return;
     }
 
-    if (transcriptResult.error === "NO_SUPADATA_KEY") {
-      showError(
-        "API key missing",
-        "Add your Supadata API key in YouTube Digest Settings.",
-      );
-      return;
-    }
     showError(
       "No transcript found",
       transcriptResult.message || transcriptResult.error,
@@ -1502,7 +1494,7 @@ function showError(title, message) {
 }
 
 /**
- * 无原生字幕时的提示：给出"使用 Supadata 兜底"和"开启 Whisper"两个可选操作。
+ * 无原生字幕时的提示：唯一可用的补救方式是本地 Whisper，直接引导去设置。
  */
 function showSubtitleFallbackError(result) {
   awaitingCaptureGrant = false;
@@ -1511,16 +1503,10 @@ function showSubtitleFallbackError(result) {
     "No native subtitle found";
   document.getElementById("errorMessage").textContent =
     result.message ||
-    "该视频未检测到平台原生字幕。你可以选择：使用 Supadata 获取，或在设置中启用本地 Whisper 转录。";
+    "该视频未检测到平台原生字幕。请先在设置中启用本地 Whisper 转录，再重试。";
   const btn = document.getElementById("errorBtn");
-  btn.textContent = "Use Supadata (fallback)";
-  errorAction = async () => {
-    const r = await chrome.runtime.sendMessage({
-      action: "fetchTranscriptSupadata",
-      videoId: currentVideoId,
-    });
-    applyTranscriptResult(r);
-  };
+  btn.textContent = "Open Settings";
+  errorAction = () => chrome.runtime.sendMessage({ action: "openOptions" });
 }
 
 /**
@@ -1587,7 +1573,7 @@ async function applyTranscriptResult(transcriptResult) {
   currentTranscriptText = transcriptResult.transcriptText;
   currentTranscriptTimestamped = transcriptResult.transcriptTextTimestamped;
   currentTranscriptLanguage = transcriptResult.language || null;
-  currentTranscriptSource = transcriptResult.source || "supadata";
+  currentTranscriptSource = transcriptResult.source || "platform";
 
   renderTranscript();
   showState("results");
@@ -1601,7 +1587,6 @@ async function applyTranscriptResult(transcriptResult) {
 
 function showConfigError(configStatus) {
   const missingKeys = [];
-  if (!configStatus.hasSupadataKey) missingKeys.push("Supadata");
   if (!configStatus.hasAiKey) missingKeys.push("AI provider");
 
   showState("error");
@@ -2126,7 +2111,7 @@ function getTranscriptContext(selectedText) {
 /**
  * Saves the current digest results to persistent local storage.
  * Results survive browser restarts — reopening the same video loads from cache
- * without consuming API tokens or Supadata calls.
+ * without consuming API tokens or re-fetching subtitles.
  * Cache expires after 30 days. Oldest entries evicted when > 20 videos cached.
  */
 async function saveToCache(videoId) {

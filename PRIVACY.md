@@ -15,22 +15,19 @@ Depending on the feature you use, YouTube Digest handles:
 - transcript context around a timestamped note;
 - content you ask to translate;
 - notes you save;
-- Supadata and DeepSeek configuration, including API keys; and
+- DeepSeek configuration and API key; and
 - cached transcript, digest, and translation results.
 
 ## Where data goes
 
-### Supadata
-
-Supadata is now an optional, manual fallback. When you choose it, YouTube Digest
-sends the canonical YouTube video URL to `https://api.supadata.ai` with your
-Supadata API key, and Supadata returns the transcript and timestamps. A Supadata
-key is only required if you use this manual fallback.
-
 ### Local Whisper (optional)
 
+Subtitles are read from the page you already have open: YouTube caption tracks,
+Bilibili's subtitle API, or a generic HTML5 `video.textTracks`. No transcript
+vendor receives the video URL.
+
 If you enable **Local Whisper** and no native subtitle exists, the extension
-captures the currently-playing audio window (~2 minutes, via `captureStream`)
+captures the currently-playing audio window (~2 minutes, via `chrome.tabCapture`)
 and sends it to the local server you configure in Settings (default
 `http://127.0.0.1:8000`, `whisper/whisper_server.py`). Audio never leaves your
 machine unless you point the server URL elsewhere. DRM / encrypted streams
@@ -48,8 +45,8 @@ The published version sends AI feature content to DeepSeek V4 Flash at `https://
 
 The endpoint and `deepseek-v4-flash` model are fixed in the published Settings page. You provide one DeepSeek API key. To use another provider or model, you must adapt your own local source copy and its permissions. The Settings page provides a coding-agent prompt for that purpose and warns you never to include an API key in the prompt or chat.
 
-Requests go directly from the extension to Supadata or DeepSeek, and (when you
-enable it) to the local Whisper server you configure. Remote requests are
+Requests go directly from the extension to DeepSeek, and (when you enable it) to
+the local Whisper server you configure. Remote requests are
 authenticated with the keys you supply. YouTube Digest's developer does not
 proxy or receive these requests.
 
@@ -59,7 +56,7 @@ Those services process data under their own terms, privacy policies, retention p
 
 YouTube Digest uses Chrome's local extension storage, not a YouTube Digest cloud service.
 
-- Supadata (optional), DeepSeek, and Whisper settings and API keys remain on the device in Chrome's extension storage.
+- DeepSeek and Whisper settings and API keys remain on the device in Chrome's extension storage.
 - Saved notes remain until you delete them or remove/clear the extension's data. The extension keeps up to 100 notes.
 - Recent transcript, digest, and per-segment translation cache entries are stored
   locally. The cache is limited to 20 videos, and entries older than 30 days are
@@ -72,9 +69,9 @@ To remove data:
 - delete individual saved notes in YouTube Digest;
 - use the Options page to clear cached digests, delete all notes, or reset all extension data;
 - remove the extension or clear its stored data from Chrome to delete all local settings, keys, notes, and cache entries; and
-- revoke keys in the Supadata or DeepSeek dashboard to stop their future use.
+- revoke your key in the DeepSeek dashboard to stop its future use.
 
-Clearing local data does not delete information already processed or retained by Supadata or DeepSeek. Use each service's controls for service-side requests.
+Clearing local data does not delete information already processed or retained by DeepSeek. Use its own controls for service-side requests.
 
 ## Permissions
 
@@ -85,7 +82,6 @@ YouTube Digest uses Chrome permissions for these purposes:
 - `tabs`: identify and interact with the active YouTube tab.
 - `scripting`: coordinate the extension's YouTube page controls.
 - YouTube host access: read the active video's URL and metadata and provide timestamp controls.
-- Supadata host access: retrieve transcripts.
 - DeepSeek host access: provide AI overviews, explanations, translation, and note polishing through DeepSeek V4 Flash.
 
 YouTube Digest does not use these permissions to monitor general browsing activity.

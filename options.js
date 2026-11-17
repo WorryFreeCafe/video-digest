@@ -9,13 +9,7 @@ const YTD_OPTIONS = (() => {
       languageGroupLabel: "Interface language",
       heading: "Bring your own API keys",
       lede:
-        "Keys stay in this Chrome profile and are sent only to Supadata and DeepSeek. This open-source extension has no developer server or analytics.",
-      transcriptProvider: "Transcript provider",
-      supadataApiKeyLabel: "Supadata API key",
-      supadataHelp: "Used to fetch timestamped YouTube subtitles. ",
-      supadataLink: "Create a Supadata account and key",
-      supadataHelpSuffix:
-        ". Supadata generates the key during onboarding.",
+        "Keys stay in this Chrome profile and are sent only to DeepSeek. Your local Whisper server stays on your own machine. This open-source extension has no developer server or analytics.",
       whisperProvider: "Local Whisper (fallback)",
       whisperEnabledLabel:
         "Enable local Whisper transcription when no native subtitle exists",
@@ -62,9 +56,8 @@ const YTD_OPTIONS = (() => {
       footer:
         'Read <a href="PRIVACY.md" target="_blank">PRIVACY.md</a> in the repository for the complete data-flow description.',
       migrationWarning:
-        "Custom provider settings were removed safely. Your Supadata key was kept, but the AI key was cleared. Enter a DeepSeek API key to continue.",
+        "Custom provider settings were removed safely. Your AI key was cleared. Enter a DeepSeek API key to continue.",
       saving: "Saving…",
-      addSupadataKey: "Add a Supadata API key.",
       addDeepseekKey: "Add a DeepSeek API key.",
       saved: "Saved. Reopen YouTube Digest to use these settings.",
       saveFailed: "Could not save settings. Please try again.",
@@ -86,12 +79,7 @@ const YTD_OPTIONS = (() => {
       languageGroupLabel: "界面语言",
       heading: "使用你自己的 API 密钥",
       lede:
-        "密钥仅保存在当前 Chrome 个人资料中，只会发送给 Supadata 和 DeepSeek。本开源扩展没有开发者服务器，也不使用分析服务。",
-      transcriptProvider: "字幕服务",
-      supadataApiKeyLabel: "Supadata API 密钥",
-      supadataHelp: "用于获取带时间戳的 YouTube 字幕。",
-      supadataLink: "创建 Supadata 账号并获取密钥",
-      supadataHelpSuffix: "。Supadata 会在引导流程中生成密钥。",
+        "密钥仅保存在当前 Chrome 个人资料中，只会发送给 DeepSeek。本地 Whisper 服务始终运行在你自己的机器上。本开源扩展没有开发者服务器，也不使用分析服务。",
       whisperProvider: "本地 Whisper（兜底）",
       whisperEnabledLabel: "无原生字幕时启用本地 Whisper 转录",
       whisperServerUrlLabel: "Whisper 服务地址",
@@ -136,9 +124,8 @@ const YTD_OPTIONS = (() => {
       footer:
         '完整数据流说明请参阅仓库中的 <a href="PRIVACY.md" target="_blank">PRIVACY.md</a>。',
       migrationWarning:
-        "已安全移除自定义服务设置。Supadata 密钥已保留，AI 密钥已清除。请输入 DeepSeek API 密钥以继续使用。",
+        "已安全移除自定义服务设置。AI 密钥已清除，请输入 DeepSeek API 密钥以继续使用。",
       saving: "正在保存…",
-      addSupadataKey: "请添加 Supadata API 密钥。",
       addDeepseekKey: "请添加 DeepSeek API 密钥。",
       saved: "已保存。请重新打开 YouTube Digest 以使用这些设置。",
       saveFailed: "无法保存设置，请重试。",
@@ -362,7 +349,6 @@ const YTD_OPTIONS = (() => {
     );
     const form = doc.getElementById("settingsForm");
     const aiApiKeyInput = doc.getElementById("aiApiKey");
-    const supadataApiKeyInput = doc.getElementById("supadataApiKey");
     const whisperEnabledInput = doc.getElementById("whisperEnabled");
     const whisperServerUrlInput = doc.getElementById("whisperServerUrl");
     const whisperModelInput = doc.getElementById("whisperModel");
@@ -437,7 +423,6 @@ const YTD_OPTIONS = (() => {
         const settings = migration.settings;
 
         aiApiKeyInput.value = settings.aiApiKey;
-        supadataApiKeyInput.value = settings.supadataApiKey;
         if (whisperEnabledInput) {
           whisperEnabledInput.checked = !!settings.whisperEnabled;
         }
@@ -471,7 +456,6 @@ const YTD_OPTIONS = (() => {
 
       const settings = settingsApi.normalize({
         aiApiKey: aiApiKeyInput.value,
-        supadataApiKey: supadataApiKeyInput.value,
         whisperEnabled: whisperEnabledInput
           ? whisperEnabledInput.checked
           : false,
@@ -485,12 +469,6 @@ const YTD_OPTIONS = (() => {
 
       if (!settings.aiApiKey) {
         setStatus(saveStatus, "addDeepseekKey");
-        return;
-      }
-      // Supadata key 不再强制：启用本地 Whisper 或仅需平台原生字幕时，
-      // 即使没有 Supadata key 也能工作。只有明确需要 Supadata 兜底时才必须填写。
-      if (!settings.supadataApiKey && !settings.whisperEnabled) {
-        setStatus(saveStatus, "addSupadataKey");
         return;
       }
 

@@ -219,7 +219,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === "fetchBilibiliSubtitleMeta") {
     // 从 B站页面 window.__INITIAL_STATE__ 提取 cid 与 bvid，供 background
-    // 调用 B站字幕接口（返回 body 数组，不消耗任何 Supadata 额度）。
+    // 调用 B站字幕接口（返回 body 数组，全程免费）。
     const meta = extractBilibiliCid();
     sendResponse(meta);
     return false;
@@ -1025,7 +1025,7 @@ function extractBilibiliVideoInfo() {
 /**
  * 站点专属字幕元信息提取。
  * 返回当前站点、URL、以及用于获取平台原生字幕的关键标识。background 据此
- * 决定走哪条免费字幕通道，尽量不消耗 Supadata 额度。
+ * 决定走哪条免费字幕通道。
  */
 function extractPlatformSubtitleMeta() {
   const url = window.location.href;
@@ -1225,7 +1225,7 @@ async function fetchYoutubeCaptionText(trackLangs) {
 /**
  * 从 B站页面全局状态提取 cid（视频分 P 编号）与 bvid。
  * B站字幕接口依赖 cid；拿到后可请求 /x/player/wbi/v2 获取字幕 URL，
- * 全程不消耗 Supadata 额度。
+ * 全程免费。
  * 返回 { cid:number|null, bvid:string|null, ok:boolean }。
  */
 function extractBilibiliCid() {

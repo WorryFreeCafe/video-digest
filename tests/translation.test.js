@@ -348,7 +348,7 @@ test("semantic segmentation rebuilds sentences across caption boundaries", () =>
   assert.equal(segments[1].start, 5);
 });
 
-test("a huge raw Supadata entry is split into seekable bounded segments", () => {
+test("a huge raw caption entry is split into seekable bounded segments", () => {
   const { groupTranscriptEntries } = loadSidepanelHelpers();
   const text = Array.from({ length: 900 }, (_, index) => `word${index}`).join(" ");
   const segments = groupTranscriptEntries([

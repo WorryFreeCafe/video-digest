@@ -17,6 +17,14 @@ YouTube Digest 是一个需要自行提供 API Key 的开源项目，通过 GitH
 
 ![YouTube Digest 双语演示](YouTube%20Digest%20demo%20bilingual.png)
 
+## v1.3.4 更新
+
+- 彻底移除 Supadata 集成。字幕只剩两条来源：平台自己的字幕轨，或你本机的 Whisper 服务。
+- Supadata 本质是「把已经存在的字幕再代理一次」的付费接口。对没有字幕的视频，它用 `mode=native` 只会返回 `206`，帮不上忙；而它唯一真正有价值的地方（YouTube 需要 token 签名的 `timedtext`）已经由 `caption-pot-hook.js` 在扩展内解决。
+- 设置页不再索要字幕服务 Key，扩展也不再申请 `api.supadata.ai` 的 host 权限。
+- 修复侧边栏的一个门禁问题：之前只要没存 Supadata Key，面板就拒绝打开，哪怕这个视频的字幕可以直接从页面读。
+- 笔记缓存丢失时改为提示你重新加载摘要，不再在后台悄悄重新下载字幕。
+
 ## v1.3.3 更新
 
 - 降低 YouTube 页面上的空闲开销：Note 按钮的重试循环原先会被每一次 DOM 变动重新挂起，导致重试预算被不断重置，原本「3 秒后放弃」的兜底变成在持续变动的页面上永久以 10 次/秒 轮询播放器。
@@ -42,7 +50,7 @@ YouTube Digest 是一个需要自行提供 API Key 的开源项目，通过 GitH
 
 ## v1.3.0 更新
 
-- 侧边栏现在支持 B 站：B 站播放页会注入 Digest 按钮，点开即用免费原生字幕，不消耗 Supadata 额度。
+- 侧边栏现在支持 B 站：B 站播放页会注入 Digest 按钮，点开即用免费原生字幕，不产生任何第三方字幕费用。
 - 修复"点多少次图标都提示 `Extension has not been invoked`"：清单补上 `activeTab` 权限，并改回由 `action.onClicked` 打开面板（`openPanelOnActionClick` 会吞掉点击，导致授权永远不生效）。
 - 面板提示需要唤醒时，点一次图标或按 `Alt+Shift+9` 会自动继续转录，不用再点第二次。
 - 再次录音时自动清理上一次残留的音频流，避免出现 `Cannot capture a tab with an active stream`。
@@ -65,7 +73,7 @@ YouTube Digest 是一个需要自行提供 API Key 的开源项目，通过 GitH
 你的 Agent 应该帮你：
 
 1. 先询问你想把项目长期保存在哪里，再下载或克隆到那里，并告诉你准确的完整路径。如果你需要建议，可以推荐 macOS 或 Linux 上的 `~/Documents/youtube-digest`，或 Windows 上的 `%USERPROFILE%\Documents\youtube-digest`。
-2. 打开下方 Supadata 和 DeepSeek 官方页面，指导你创建自己的账号。
+2. 打开下方 DeepSeek 官方页面，指导你创建自己的账号。
 3. 指导你在 Chrome 中通过“加载已解压的扩展程序”选择你刚才确定的那个准确项目文件夹。
 4. 告诉你应该在扩展的“设置”页面哪个位置填写 API Key。
 5. 打开一个带字幕的 YouTube 视频，确认字幕和翻译功能可以使用。
@@ -91,20 +99,7 @@ YouTube Digest 是一个需要自行提供 API Key 的开源项目，通过 GitH
 
 ## 设置 API Key
 
-YouTube Digest 需要你在自己的服务账号中准备两个 Key：
-
-1. **Supadata API Key**，用于获取 YouTube 字幕。
-2. **DeepSeek API Key**，用于生成概览、讲解内容、翻译和自动润色笔记。
-
-### 获取 Supadata API Key
-
-1. 打开 Supadata 官方[注册页面](https://dash.supadata.ai/auth/sign-up)。
-2. 创建账号并完成简短的新手引导。
-3. Supadata 会在新手引导过程中自动生成 API Key。
-4. 之后可以随时打开 [Supadata 控制台](https://dash.supadata.ai/)查找或管理 Key。
-5. 复制 Key，并粘贴到 YouTube Digest 设置中的 **Supadata API key**。
-
-如果页面流程发生变化，请查看 [Supadata 官方文档](https://docs.supadata.ai/)。
+YouTube Digest 只需要你在自己的服务账号中准备一个 Key：**DeepSeek API Key**，用于生成概览、讲解内容、翻译和自动润色笔记。字幕本身不需要任何 Key，它来自你打开的页面，或来自你自己机器上的 Whisper。
 
 ### 获取 DeepSeek API Key
 
@@ -143,7 +138,7 @@ API Key 和设置保存在你设备上的 Chrome 扩展本地存储中。发布�
 
 - Chrome 116 或更高版本。
 - 标准的 `youtube.com/watch` 视频页面。
-- Supadata 能够返回的原生字幕。YouTube Digest 会优先请求英文字幕，也可能显示其他可用的原生语言。
+- 直接从页面读取的平台原生字幕：YouTube 的 `captionTracks`（含播放器自己使用的带签名 `timedtext` 地址）与 B 站字幕接口。不经过任何第三方字幕服务。
 - 原文、简体中文和双语对照字幕。
 - AI 概览、选中文本讲解、翻译和自动润色笔记。
 - 本地笔记，以及最近字幕、概览和翻译的本地缓存。
@@ -151,17 +146,15 @@ API Key 和设置保存在你设备上的 Chrome 扩展本地存储中。发布�
 
 Shorts、直播、私密视频、受访问限制的视频，以及没有原生字幕的视频可能无法使用。目前没有测试 Firefox、Safari、移动浏览器或其他 Chromium 浏览器。
 
-## 字幕来源路由（三种场景）
+## 字幕来源路由（两种场景）
 
-YouTube Digest 现在按可用性路由字幕获取，不再每个视频都盲目消耗一次 Supadata：
+YouTube Digest 按可用性路由字幕获取。链路里没有任何按次计费的字幕服务，所以探测失败不会产生费用：
 
-1. **平台原生字幕（免费，不耗 Supadata）**：扩展会先在当前页面探测原生字幕，例如 YouTube 的 `captionTracks`、B 站免费字幕接口、或通用 HTML5 `video.textTracks`。找到就直接用于摘要，**0 消耗** Supadata。
+1. **平台原生字幕**：扩展先在当前页面探测原生字幕，例如 YouTube 的 `captionTracks`、B 站免费字幕接口、或通用 HTML5 `video.textTracks`。YouTube 的 `/api/timedtext` 现在要求 proof-of-origin token，缺 token 时返回 **HTTP 200 但响应体为空**；`caption-pot-hook.js` 会记下播放器自己请求过的签名 URL，内容脚本据此取回带完整时间轴的字幕轨。B 站接口只对已登录会话返回字幕。
 
-2. **无原生字幕 → 本地 Whisper 转录（可选）**：如果没有平台字幕、且你在设置里开启了**本地 Whisper**，扩展会通过 `chrome.tabCapture` 捕获当前标签页的音频（对跨域播放器有效），发送到本地 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) 服务（`whisper/whisper_server.py`）转写。转录在你的电脑上进行，不经过 Supadata。
+2. **无原生字幕 → 本地 Whisper 转录（可选）**：如果没有平台字幕、且你在设置里开启了**本地 Whisper**，扩展会通过 `chrome.tabCapture` 捕获当前标签页的音频（对跨域播放器有效），发送到本地 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) 服务（`whisper/whisper_server.py`）转写。转录在你的电脑上完成，音频不会离开本机。
 
-3. **手动 Supadata 兜底**：Supadata 不再被自动调用。当既没有原生字幕、也没启用 Whisper 兜底时，侧边栏会显示手动**使用 Supadata（兜底）**按钮，只有你选择时才会消耗额度。
-
-Supadata 仍然可用，但现在是可选路径，而不是默认路径。
+两条路都拿不到文本时，面板会如实说明情况并指向 Whisper 设置，不会把视频地址悄悄上传到任何地方。
 
 ### 运行本地 Whisper 服务（可选）
 
@@ -179,19 +172,27 @@ python whisper/whisper_server.py --model small --port 8000
 - 也可以用快捷键 **Alt+Shift+9** 代替点图标：效果相同（同样会授予当前标签页的采集授权），适合图标被折叠进"扩展程序"菜单时使用。注意**刷新页面会撤销授权**，刷新后需要再按一次。
 - 授权来自 manifest 里的 `activeTab` 权限加上一次真实调用；缺少 `activeTab` 时无论点多少次图标都会失败，所以不要把它从 `permissions` 里删掉。
 
-## Supadata 免费额度和请求成本
+## 后续开发方案：用 Groq 做云端转录（尚未实现）
 
-截至 2026 年 8 月 9 日，[Supadata 价格页面](https://supadata.ai/pricing)显示免费版每月提供 **100 credits**，不需要信用卡，未使用的额度不会结转。价格可能变化，使用前请查看最新页面。
+移除字幕接口之后，没有字幕的视频只能靠本地 Whisper，而它目前只录 5 到 120 秒的播放窗口。这个长度够采样，不够做摘要。计划中的补救方案是可选的云端路径，用 [Groq](https://groq.com/) 而不是字幕供应商，因为 Groq 是直接转录音频，而不是把已有字幕代理一遍。
 
-[Supadata 字幕接口文档](https://docs.supadata.ai/get-transcript)说明了不同模式的计费方式：
+选它的理由：
 
-- 获取一次原生字幕消耗 **1 credit**，与视频时长无关。
-- AI 生成字幕每分钟消耗 **2 credits**。YouTube Digest 不会使用这条路径，因为它强制使用 `mode=native`。
-- 如果没有可用原生字幕并返回 HTTP `206`，仍会消耗 **1 credit**。
+- `whisper-large-v3-turbo` 官方标价 **每音频小时 $0.04**（20 分钟视频约 $0.013，一小时约 $0.04），单次请求最低按 10 秒计费。更看准确率可以用 `whisper-large-v3`，每小时 $0.111。
+- 它大约以 216 倍实时速度运行，20 分钟的视频几秒就出结果。
+- 接口形状与 OpenAI 音频接口一致（`POST /openai/v1/audio/transcriptions`，参数 `model`、`file`、`response_format=verbose_json`），现有基于 `fetch` 的代码不需要引入 SDK。
 
-按照当前只获取原生字幕的方式，如果每次请求都成功，免费版每月大约可以查询 100 个视频。重试和没有字幕的查询也会消耗额度，所以实际成功数量可能更少。
+实现步骤：
 
-DeepSeek 的额度与 Supadata 分开计算。YouTube Digest 不收款，也不转售 API 服务。建议为两个账号设置消费上限并定期查看用量。
+1. 设置项：新增 `transcriptionProvider: "local" | "groq"`、`groqApiKey`、`groqModel`（默认 `whisper-large-v3-turbo`）。Key 与 DeepSeek Key 一样存在 `chrome.storage.local`，并且绝不默认选中 Groq。
+2. 录音：`handleCaptureAudioTranscribe` 已经掌握 tabCapture 流程。把 5 到 120 秒的硬限制改成按请求传入，边播放边录完整条音轨；或者把 `MediaRecorder` 输出按 25MB 以内切片（压缩语音大约一小时）后按顺序上传。
+3. 转录：每片用 `response_format=verbose_json`，把返回分段的开始时间加上该片的偏移量。复用 `YTD_SUBTITLE_SOURCES.buildTranscriptFromChunks`，面板、时间戳跳转、笔记和翻译都不用改。
+4. 门禁：保持「没有明确点击就不花钱」的规则。请求前显示预计音频时长和费用。
+5. 缓存：仍写入 `digest_<videoId>`，并提升 `DIGEST_CACHE_VERSION`，避免切换服务商后把 30 秒样本当成完整字幕。
+
+已知限制：基础档单次上传 25MB（开发档 100MB）、最低按 10 秒计费、不带说话人分离，DRM 与加密流依然无法捕获。音频会离开本机，所以 README 和设置页必须在这个开关旁边写清楚。
+
+其他音频接口按每小时音频对比：OpenAI `gpt-4o-mini-transcribe` 约 $0.18、`whisper-1` 约 $0.36，AssemblyAI Universal-2 约 $0.15，Deepgram Nova-3 约 $0.26。Groq 在这组里明显最便宜。
 
 ## DeepSeek V4 Flash 价格
 
@@ -234,12 +235,12 @@ YouTube Digest 使用原生 HTML、CSS 和 JavaScript，没有构建步骤，很
 
 YouTube Digest 会直接从扩展向服务商发送请求：
 
-1. 把标准化的 YouTube 视频地址发送给 Supadata，用于获取原生字幕。
+1. 字幕来自你已经打开的页面；需要音频转录时，只发送到你配置的本地 Whisper 服务。字幕获取全程不离开你的电脑。
 2. 当你使用 AI 功能时，把字幕和相关视频信息发送给 DeepSeek。
 3. 翻译或讲解等功能只发送当前需要的内容，例如选中的文本和上下文，或少量字幕分段。
 4. API Key、设置、笔记和最近缓存保存在 Chrome 本地。
 
-YouTube Digest 没有账号系统、广告、分析统计或行为追踪。Supadata 和 DeepSeek 仍会按照各自的条款和隐私政策处理数据。详情请查看 [PRIVACY.md](PRIVACY.md)。
+YouTube Digest 没有账号系统、广告、分析统计或行为追踪。DeepSeek 仍会按照它自己的条款和隐私政策处理数据。详情请查看 [PRIVACY.md](PRIVACY.md)。
 
 ## 常见问题
 
@@ -260,7 +261,7 @@ YouTube Digest 没有账号系统、广告、分析统计或行为追踪。Supad
 
 ### YouTube Digest 提示需要设置
 
-- 打开 **Settings**，保存 DeepSeek Key。Supadata Key 只有在你想使用手动 Supadata 兜底时才需要；使用平台原生字幕或开启本地 Whisper 兜底时，Supadata 是可选的。
+- 打开 **Settings**，保存 DeepSeek Key。这是本扩展唯一需要填写的 Key。
 - 发布版本固定使用 DeepSeek V4 Flash，没有需要填写的 Base URL 或 Model 字段。
 - 如果设置提示旧的自定义服务已移除，请重新填写 DeepSeek Key。旧 AI Key 已安全清除，避免被错误用于 DeepSeek。
 
@@ -268,9 +269,7 @@ YouTube Digest 没有账号系统、广告、分析统计或行为追踪。Supad
 
 - 确认视频是公开的，并且有原生字幕。
 - 如果你没有在设置中开启**本地 Whisper**，扩展不会自行转录音频。开启它（并启动 `whisper/whisper_server.py`）即可获得音频转录兜底。
-- 使用手动 Supadata 兜底时，请注意：没有字幕的查询和手动重试也可能消耗额度。
-
-缺少原生字幕时，扩展不会自动消耗 Supadata 额度；它会使用平台字幕、你的本地 Whisper 兜底，或先询问你再决定是否进行付费查询。
+字幕获取不经过任何付费服务，重试也不产生费用。如果平台没有字幕轨、而 Whisper 又没开启，请在设置中开启并启动 `whisper/whisper_server.py`；没有云端兜底可以依赖。
 
 ### AI 请求失败
 
