@@ -444,9 +444,8 @@ function setupEventListeners() {
   document
     .getElementById("copyTranscriptBtn")
     ?.addEventListener("click", copyTranscript);
-  document
-    .getElementById("exportTranscriptBtn")
-    ?.addEventListener("click", exportTranscript);
+  setupExportMenu();
+  setupTranscriptHeaderStickyState();
   document.querySelectorAll(".transcript-mode-btn").forEach((button) => {
     button.addEventListener("click", () => {
       handleDisplayLanguageModeChange(button.dataset.transcriptMode);
@@ -1407,16 +1406,19 @@ function setupTranscriptSearch() {
   next?.addEventListener("click", () => moveTranscriptSearch(1));
 }
 
+function transcriptSegmentDisplayText(segment) {
+  if (currentTranscriptMode === "original") return segment.text;
+  const translated = transcriptParagraphCache.get(
+    transcriptTranslationCacheKey(segment),
+  );
+  if (currentTranscriptMode === "zh") return translated || segment.text;
+  return translated ? `${segment.text}\n${translated}` : segment.text;
+}
+
 function getDisplayedTranscriptText() {
   if (currentTranscriptMode === "original") return currentTranscriptText || "";
   return getActiveTranscriptSegments()
-    .map((segment) => {
-      const translated = transcriptParagraphCache.get(
-        transcriptTranslationCacheKey(segment),
-      );
-      if (currentTranscriptMode === "zh") return translated || segment.text;
-      return translated ? `${segment.text}\n${translated}` : segment.text;
-    })
+    .map((segment) => transcriptSegmentDisplayText(segment))
     .join("\n\n");
 }
 
@@ -1424,30 +1426,225 @@ function copyTranscript() {
   copyToClipboardWithFeedback(getDisplayedTranscriptText(), "copyTranscriptBtn");
 }
 
-function exportTranscript() {
-  const transcriptContent = getDisplayedTranscriptText();
+// ============================================================
+// TRANSCRIPT EXPORT
+// ============================================================
+
+const TRANSCRIPT_EXPORT_FORMATS = {
+  txt: { extension: "txt", mime: "text/plain" },
+  "txt-timed": { extension: "txt", mime: "text/plain" },
+  srt: { extension: "srt", mime: "application/x-subrip" },
+  vtt: { extension: "vtt", mime: "text/vtt" },
+};
+
+/**
+ * Subtitle timecodes need a stable `HH:MM:SS,mmm` (SRT) or `HH:MM:SS.mmm`
+ * (WebVTT) shape. Rounding happens once, on milliseconds, so a cue can never
+ * end up as `00:00:59,1000`.
+ */
+function formatSubtitleTimestamp(seconds, separator = ",") {
+  const value = Number(seconds);
+  const safe = Number.isFinite(value) ? Math.max(0, value) : 0;
+  const totalMs = Math.round(safe * 1000);
+  const pad = (part, width = 2) => String(part).padStart(width, "0");
+  const hours = Math.floor(totalMs / 3_600_000);
+  const minutes = Math.floor((totalMs % 3_600_000) / 60_000);
+  const secs = Math.floor((totalMs % 60_000) / 1000);
+  const millis = totalMs % 1000;
+  return `${pad(hours)}:${pad(minutes)}:${pad(secs)}${separator}${pad(millis, 3)}`;
+}
+
+/** `[12:04]` for short videos, `[1:02:04]` past the hour. */
+function formatClockTimestamp(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  const pad = (part) => String(part).padStart(2, "0");
+  return hours
+    ? `${hours}:${pad(minutes)}:${pad(secs)}`
+    : `${pad(minutes)}:${pad(secs)}`;
+}
+
+/**
+ * Turns transcript segments into timed cues. Captions carry a start time but no
+ * end time, so each cue runs until the next one starts, capped by a reading
+ * estimate so a long pause does not leave a caption on screen for a minute.
+ */
+function buildTranscriptCues(segments, textFor = (segment) => segment.text) {
+  const list = Array.isArray(segments) ? segments : [];
+  const cues = [];
+
+  list.forEach((segment, index) => {
+    const text = String(textFor(segment) ?? "").replace(/\r/g, "").trim();
+    if (!text) return;
+
+    const start = Math.max(0, Number(segment?.start) || 0);
+    const nextStart = Number(list[index + 1]?.start);
+    const gap =
+      Number.isFinite(nextStart) && nextStart > start ? nextStart - start : null;
+    const reading = Math.min(7, Math.max(1.6, text.length / 12));
+    const duration =
+      gap === null ? reading : Math.min(reading, Math.max(0.6, gap));
+
+    cues.push({ start, end: start + duration, text });
+  });
+
+  return cues;
+}
+
+function buildSubtitleFile(cues, format) {
+  const separator = format === "vtt" ? "." : ",";
+  const blocks = cues.map((cue, index) => {
+    const start = formatSubtitleTimestamp(cue.start, separator);
+    const end = formatSubtitleTimestamp(cue.end, separator);
+    const range = `${start} --> ${end}`;
+    // SRT numbers every cue; WebVTT leaves them off.
+    return format === "vtt"
+      ? `${range}\n${cue.text}`
+      : `${index + 1}\n${range}\n${cue.text}`;
+  });
+
+  const head = format === "vtt" ? "WEBVTT" : null;
+  return [head, ...blocks].filter(Boolean).join("\n\n") + "\n";
+}
+
+function buildTimestampedText(cues) {
+  return cues
+    .map((cue) => {
+      const stamp = `[${formatClockTimestamp(cue.start)}]`;
+      const indent = " ".repeat(stamp.length + 1);
+      const [first, ...rest] = cue.text.split("\n");
+      return [`${stamp} ${first}`, ...rest.map((line) => `${indent}${line}`)].join(
+        "\n",
+      );
+    })
+    .join("\n\n");
+}
+
+/** Shared header for the two plain-text variants. */
+function buildTranscriptExportHeader() {
   const videoUrl =
     currentVideoUrl || `https://youtube.com/watch?v=${currentVideoId}`;
-
-  let exportText = "";
-  exportText += `TRANSCRIPT\n`;
-  exportText += `${"=".repeat(60)}\n\n`;
-  exportText += `Title: ${currentVideoTitle || "Unknown"}\n`;
-  exportText += `Channel: ${currentChannelName || "Unknown"}\n`;
-  exportText += `URL: ${videoUrl}\n`;
-  exportText += `\n${"—".repeat(60)}\n\n`;
-
+  const rule = "-".repeat(60);
+  let header = "TRANSCRIPT\n";
+  header += `${"=".repeat(60)}\n\n`;
+  header += `Title: ${currentVideoTitle || "Unknown"}\n`;
+  header += `Channel: ${currentChannelName || "Unknown"}\n`;
+  header += `URL: ${videoUrl}\n`;
+  header += `\n${rule}\n\n`;
   if (currentVideoDescription) {
-    exportText += `DESCRIPTION:\n${currentVideoDescription}\n`;
-    exportText += `\n${"—".repeat(60)}\n\n`;
+    header += `DESCRIPTION:\n${currentVideoDescription}\n`;
+    header += `\n${rule}\n\n`;
+  }
+  return header;
+}
+
+function exportTranscript(format = "txt") {
+  const spec = TRANSCRIPT_EXPORT_FORMATS[format] || TRANSCRIPT_EXPORT_FORMATS.txt;
+  const base = sanitizeFilename(currentVideoTitle || currentVideoId);
+
+  if (format === "srt" || format === "vtt") {
+    const cues = buildTranscriptCues(
+      getActiveTranscriptSegments(),
+      transcriptSegmentDisplayText,
+    );
+    if (!cues.length) return;
+    downloadTextFile(
+      buildSubtitleFile(cues, format),
+      `${base}-transcript.${spec.extension}`,
+      spec.mime,
+    );
+    return;
   }
 
-  exportText += `TRANSCRIPT:\n\n${transcriptContent}\n`;
-  exportText += `\n${"—".repeat(60)}\n`;
-  exportText += `Exported by YouTube Digest\n`;
+  const body =
+    format === "txt-timed"
+      ? buildTimestampedText(
+          buildTranscriptCues(
+            getActiveTranscriptSegments(),
+            transcriptSegmentDisplayText,
+          ),
+        )
+      : getDisplayedTranscriptText();
 
-  const filename = `${sanitizeFilename(currentVideoTitle)}-transcript.txt`;
-  downloadTextFile(exportText, filename);
+  const rule = "-".repeat(60);
+  const exportText =
+    buildTranscriptExportHeader() +
+    `TRANSCRIPT:\n\n${body}\n\n${rule}\nExported by YouTube Digest\n`;
+
+  downloadTextFile(
+    exportText,
+    `${base}-transcript.${spec.extension}`,
+    spec.mime,
+  );
+}
+
+/**
+ * The Export button opens a format menu instead of downloading immediately, so
+ * a click never has to be undone. Escape and outside clicks close it.
+ */
+function setupExportMenu() {
+  const trigger = document.getElementById("exportTranscriptBtn");
+  const menu = document.getElementById("exportFormatMenu");
+  if (!trigger || !menu) return;
+
+  const setOpen = (open) => {
+    menu.hidden = !open;
+    trigger.setAttribute("aria-expanded", String(open));
+    if (!open) return;
+    menu.querySelector(".export-menu-item")?.focus({ preventScroll: true });
+  };
+
+  trigger.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setOpen(menu.hidden);
+  });
+
+  menu.addEventListener("click", (event) => {
+    const item = event.target.closest?.("[data-export-format]");
+    if (!item) return;
+    setOpen(false);
+    exportTranscript(item.dataset.exportFormat);
+  });
+
+  document.addEventListener("click", (event) => {
+    if (menu.hidden || event.target.closest?.(".export-control")) return;
+    setOpen(false);
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || menu.hidden) return;
+    setOpen(false);
+    trigger.focus({ preventScroll: true });
+  });
+}
+
+/**
+ * Highlights the sticky transcript header once rows start sliding beneath it.
+ * The scroll handler is passive and coalesced into one frame, so it costs
+ * nothing while the transcript is being read.
+ */
+function setupTranscriptHeaderStickyState() {
+  const scroller = document.getElementById("contentArea");
+  const header = document.querySelector(".transcript-section-header");
+  if (!scroller || !header) return;
+
+  let frame = 0;
+  const sync = () => {
+    frame = 0;
+    header.classList.toggle("is-stuck", scroller.scrollTop > 2);
+  };
+
+  scroller.addEventListener(
+    "scroll",
+    () => {
+      if (frame) return;
+      frame = requestAnimationFrame(sync);
+    },
+    { passive: true },
+  );
+  sync();
 }
 
 // ============================================================
@@ -1841,8 +2038,8 @@ async function copyToClipboardWithFeedback(text, buttonId) {
   }
 }
 
-function downloadTextFile(text, filename) {
-  const blob = new Blob([text], { type: "text/plain" });
+function downloadTextFile(text, filename, mime = "text/plain") {
+  const blob = new Blob([text], { type: `${mime};charset=utf-8` });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -1851,12 +2048,18 @@ function downloadTextFile(text, filename) {
   URL.revokeObjectURL(url);
 }
 
+/**
+ * Keeps letters and digits from any script, so a Chinese or Japanese title
+ * survives the round trip. The old ASCII-only class turned every CJK title into
+ * "untitled", which made exported files hard to tell apart.
+ */
 function sanitizeFilename(str) {
-  return (str || "untitled")
-    .replace(/[^\w\s-]/g, "")
+  const cleaned = String(str || "untitled")
+    .replace(/[^\p{L}\p{N}\s-]/gu, "")
     .replace(/\s+/g, "-")
-    .substring(0, 50)
-    .toLowerCase();
+    .replace(/^-+|-+$/g, "");
+  const trimmed = [...cleaned].slice(0, 60).join("");
+  return (trimmed || "untitled").toLowerCase();
 }
 
 // ============================================================
@@ -3079,4 +3282,10 @@ globalThis.__YTD_TRANSCRIPT_TESTING__ = {
   getNavigationUrl,
   renderSubtitleInlineMarkup,
   renderTranscriptSegmentContent,
+  buildTranscriptCues,
+  buildSubtitleFile,
+  buildTimestampedText,
+  formatSubtitleTimestamp,
+  formatClockTimestamp,
+  sanitizeFilename,
 };

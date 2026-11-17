@@ -15,6 +15,21 @@ YouTube Digest is a bring-your-own-key project installed locally from GitHub. It
 
 ![YouTube Digest demo](YouTube%20Digest%20demo.png)
 
+## What is new in v1.3.5
+
+- The transcript header (title, **Copy**, **Export**) now sticks to the top of
+  the panel, so both actions stay reachable however far you scroll.
+- **Export** opens a format menu instead of downloading one fixed file:
+  - **Plain text** (`.txt`) keeps the title, channel, description, and transcript.
+  - **With timestamps** (`.txt`) writes one timestamped line per caption.
+  - **Subtitles** (`.srt`) and **WebVTT** (`.vtt`) write real subtitle files with
+    `HH:MM:SS,mmm` / `HH:MM:SS.mmm` cues, ready for a video player or editor.
+- Subtitle cues take their end time from the next caption, capped by a reading
+  estimate, so a pause in speech does not leave one caption on screen for a
+  minute.
+- Exported file names keep non-Latin titles. A Chinese or Japanese title used to
+  become `untitled-transcript.txt`; it now keeps its own characters.
+
 ## What is new in v1.3.4
 
 - Removed the Supadata integration entirely. Transcripts now come from two

@@ -113,9 +113,66 @@
               <div class="section-title">Full Transcript</div>
               <div class="transcript-actions">
                 <button class="enhance-btn" id="copyTranscriptBtn">Copy</button>
-                <button class="enhance-btn" id="exportTranscriptBtn">
-                  Export
-                </button>
+                <div class="export-control">
+                  <button
+                    class="enhance-btn export-trigger"
+                    id="exportTranscriptBtn"
+                    type="button"
+                    aria-haspopup="menu"
+                    aria-expanded="false"
+                    aria-controls="exportFormatMenu"
+                  >
+                    Export
+                  </button>
+                  <div
+                    class="export-menu"
+                    id="exportFormatMenu"
+                    role="menu"
+                    aria-label="Export format"
+                    hidden
+                  >
+                    <button
+                      class="export-menu-item"
+                      type="button"
+                      role="menuitem"
+                      data-export-format="txt"
+                      title="Transcript with title, channel, and description"
+                    >
+                      <span class="export-menu-label">Plain text</span>
+                      <span class="export-menu-hint">.txt</span>
+                    </button>
+                    <button
+                      class="export-menu-item"
+                      type="button"
+                      role="menuitem"
+                      data-export-format="txt-timed"
+                      title="One line per caption, prefixed with its start time"
+                    >
+                      <span class="export-menu-label">With timestamps</span>
+                      <span class="export-menu-hint">.txt</span>
+                    </button>
+                    <button
+                      class="export-menu-item"
+                      type="button"
+                      role="menuitem"
+                      data-export-format="srt"
+                      title="SubRip subtitle file, opens in most video players and editors"
+                    >
+                      <span class="export-menu-label">Subtitles</span>
+                      <span class="export-menu-hint">.srt</span>
+                    </button>
+                    <button
+                      class="export-menu-item"
+                      type="button"
+                      role="menuitem"
+                      data-export-format="vtt"
+                      title="WebVTT subtitle file for HTML5 players"
+                    >
+                      <span class="export-menu-label">WebVTT</span>
+                      <span class="export-menu-hint">.vtt</span>
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
             <!-- Search stays inside the Transcript tab and never changes playback. -->

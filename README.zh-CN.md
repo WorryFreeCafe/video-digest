@@ -17,6 +17,16 @@ YouTube Digest 是一个需要自行提供 API Key 的开源项目，通过 GitH
 
 ![YouTube Digest 双语演示](YouTube%20Digest%20demo%20bilingual.png)
 
+## v1.3.5 更新
+
+- 字幕页的标题栏（标题、**Copy**、**Export**）改为吸顶，往下滚动时复制和导出按钮始终可见。
+- **Export** 改为先选格式再下载：
+  - **Plain text**（`.txt`）：保留标题、频道、简介和正文，和以前一致。
+  - **With timestamps**（`.txt`）：每段字幕前面带时间戳，行内换行自动缩进对齐。
+  - **Subtitles**（`.srt`）与 **WebVTT**（`.vtt`）：生成带 `HH:MM:SS,mmm` / `HH:MM:SS.mmm` 时间轴的标准字幕文件，可直接导入播放器或剪辑软件。
+- 字幕分段的结束时间取下一段的开始时间，并按字数估算阅读时长封顶，避免一段话停顿很久时同一句字幕在屏幕上挂一分钟。
+- 导出的文件名保留中文等非拉丁字符。以前中文标题会被清洗成 `untitled-transcript.txt`，现在会保留标题本身。
+
 ## v1.3.4 更新
 
 - 彻底移除 Supadata 集成。字幕只剩两条来源：平台自己的字幕轨，或你本机的 Whisper 服务。
