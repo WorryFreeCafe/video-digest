@@ -17,6 +17,14 @@ YouTube Digest 是一个需要自行提供 API Key 的开源项目，通过 GitH
 
 ![YouTube Digest 双语演示](YouTube%20Digest%20demo%20bilingual.png)
 
+## v1.3.7 更新
+
+- 字幕探测不再"读一次没有就放弃"：会等播放器把字幕轨挂出来，最多 4 秒。所以刚打开视频就点 **Digest**，不会再因为页面还没就绪而直接掉到 Whisper。
+- 修掉一处 pot 死胡同：YouTube 字幕按钮本来就是开启状态时，旧代码直接跳过自己的请求，于是永远拿不到带签名的 URL。现在会先关再开，逼播放器重新请求一次字幕轨。
+- 签名 URL 一直拿不到时，内容脚本改走 YouTube 网页版"显示转录文字"背后的 `get_transcript` 接口，这条路不需要 pot。同一份字幕有两条互相独立的读法。
+- 面板会直接说出字幕缺失的真实原因（视频没有字幕轨、返回空内容、扩展更新后页面没刷新、签名 URL 没拿到），并在旁边说明 Whisper 的状态。以前这些情况全都显示成 "Local Whisper is not running"，看起来像是插件变成了 Whisper 专属。
+- 原因在页面侧时，主按钮变成 **Reload page & retry**：字幕钩子在 `document_start` 注入，只有刷新才能让更新前就打开着的标签页恢复完整能力。
+
 ## v1.3.6 更新
 
 - 开始录音之前先探活本地 Whisper，不再出现"先录 30 秒再报连不上"的情况。服务没启动时约一秒内返回 `WHISPER_UNREACHABLE`。
@@ -167,7 +175,7 @@ Shorts、直播、私密视频、受访问限制的视频，以及没有原生�
 
 YouTube Digest 按可用性路由字幕获取。链路里没有任何按次计费的字幕服务，所以探测失败不会产生费用：
 
-1. **平台原生字幕**：扩展先在当前页面探测原生字幕，例如 YouTube 的 `captionTracks`、B 站免费字幕接口、或通用 HTML5 `video.textTracks`。YouTube 的 `/api/timedtext` 现在要求 proof-of-origin token，缺 token 时返回 **HTTP 200 但响应体为空**；`caption-pot-hook.js` 会记下播放器自己请求过的签名 URL，内容脚本据此取回带完整时间轴的字幕轨。B 站接口只对已登录会话返回字幕。
+1. **平台原生字幕**：扩展先在当前页面探测原生字幕，例如 YouTube 的 `captionTracks`、B 站免费字幕接口、或通用 HTML5 `video.textTracks`。YouTube 的 `/api/timedtext` 现在要求 proof-of-origin token，缺 token 时返回 **HTTP 200 但响应体为空**；`caption-pot-hook.js` 会记下播放器自己请求过的签名 URL，内容脚本据此取回带完整时间轴的字幕轨。拿不到签名 URL 时，内容脚本改走 YouTube 网页版"显示转录文字"背后的 `get_transcript` 接口，这条路不需要 token。B 站接口只对已登录会话返回字幕。
 
 2. **无原生字幕 → 本地 Whisper 转录（可选）**：如果没有平台字幕、且你在设置里开启了**本地 Whisper**，扩展会通过 `chrome.tabCapture` 捕获当前标签页的音频（对跨域播放器有效），发送到本地 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) 服务（`whisper/whisper_server.py`）转写。转录在你的电脑上完成，音频不会离开本机。
 

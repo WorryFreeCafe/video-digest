@@ -1703,6 +1703,65 @@ function openWhisperGuide() {
   return chrome.runtime.sendMessage({ action: "openWhisperGuide" });
 }
 
+/**
+ * 平台字幕失败的成因 → 面板文案。
+ *
+ * 这些原因以前被 Whisper 的错误盖住了：用户看到 "Local Whisper is not running"
+ * 就以为是插件改成了"必须先装 Whisper"，其实多数情况是页面侧没取到字幕。
+ */
+const PLATFORM_FAILURE_HINTS = {
+  NO_CAPTION_TRACKS: {
+    title: "This video has no captions",
+    hint: "这个视频本身没有字幕轨：创作者没上传，YouTube 也没有自动生成。",
+    reload: false,
+  },
+  POT_UNAVAILABLE: {
+    title: "Couldn't read this video's captions",
+    hint: "页面没有交出可用的字幕链接，通常是扩展更新后视频页还没刷新。刷新一次即可。",
+    reload: true,
+  },
+  CONTENT_SCRIPT_MISSING: {
+    title: "Reload the YouTube tab",
+    hint: "扩展刚更新过，当前页面里还跑着旧脚本。刷新视频页后重试。",
+    reload: true,
+  },
+  EMPTY_CAPTION_BODY: {
+    title: "YouTube returned empty captions",
+    hint: "视频页返回了空字幕，未登录或被要求人机验证时常见。确认已登录后刷新页面重试。",
+    reload: true,
+  },
+  NO_TAB: {
+    title: "Couldn't find the video tab",
+    hint: "找不到正在播放视频的标签页，请从视频页重新打开侧边栏。",
+    reload: false,
+  },
+};
+
+function platformFailureHint(result) {
+  return PLATFORM_FAILURE_HINTS[result?.platformFailure] || null;
+}
+
+/**
+ * 刷新视频页后重新跑一次字幕探测。
+ * pot 钩子是在 document_start 注入的，只有刷新才能让"扩展更新后的旧页面"
+ * 重新获得完整能力。
+ */
+async function reloadTabAndRetryTranscript() {
+  const videoId = currentVideoId;
+  if (!Number.isInteger(youtubeTabId)) return;
+  if (!videoId) return;
+  showState("loading");
+  updateLoading("Reloading the video page", "The caption hook runs when the page starts");
+  try {
+    await chrome.tabs.reload(youtubeTabId);
+  } catch (_e) {
+    /* 标签页可能已经关闭，交给下一次点击处理 */
+  }
+  await new Promise((resolve) => setTimeout(resolve, 4000));
+  currentVideoId = "";
+  await startDigest(videoId, currentVideoUrl, youtubeTabId);
+}
+
 function showError(title, message) {
   errorAction = null;
   setErrorSecondary(null);
@@ -1718,13 +1777,24 @@ function showError(title, message) {
  */
 function showSubtitleFallbackError(result) {
   awaitingCaptureGrant = false;
+  const platform = platformFailureHint(result);
   showState("error");
   document.getElementById("errorTitle").textContent =
-    "No native subtitle found";
-  document.getElementById("errorMessage").textContent =
-    result.message ||
-    "该视频未检测到平台原生字幕。请先在设置中启用本地 Whisper 转录，再重试。";
+    platform?.title || "No native subtitle found";
+  document.getElementById("errorMessage").textContent = platform
+    ? `${platform.hint}本地 Whisper 也没有启用，所以没有备用字幕来源。`
+    : result.message ||
+      "该视频未检测到平台原生字幕。请先在设置中启用本地 Whisper 转录，再重试。";
   const btn = document.getElementById("errorBtn");
+  if (platform?.reload) {
+    btn.textContent = "Reload page & retry";
+    errorAction = reloadTabAndRetryTranscript;
+    setErrorSecondary(
+      "How to install and start Whisper",
+      openWhisperGuide,
+    );
+    return;
+  }
   btn.textContent = "Open Settings";
   errorAction = () => chrome.runtime.sendMessage({ action: "openOptions" });
   setErrorSecondary("How to install and start Whisper", openWhisperGuide);
@@ -1733,7 +1803,10 @@ function showSubtitleFallbackError(result) {
 /**
  * 无字幕且 Whisper 转录失败时的提示。
  *
- * 两种情况分开处理：
+ * 三种情况分开处理：
+ *   - 平台字幕本身没取到（result.platformFailure）：标题说平台这一侧的原因，
+ *     并在正文里补一句 Whisper 也没起来。只显示 Whisper 的错误会让用户误以为
+ *     插件"现在必须先开本地 Whisper"。
  *   - WHISPER_UNREACHABLE / WHISPER_TIMEOUT：服务没启动或地址不对，重试没有
  *     意义，主按钮直接给安装/启动指南。
  *   - CAPTURE_NOT_INVOKED 是 Chrome 的授权限制，不是故障：扩展必须先在该标签页
@@ -1745,17 +1818,41 @@ function showWhisperFallbackError(result) {
   showState("error");
   const serverDown =
     result.error === "WHISPER_UNREACHABLE" || result.error === "WHISPER_TIMEOUT";
+  const platform = platformFailureHint(result);
 
-  document.getElementById("errorTitle").textContent = serverDown
-    ? "Local Whisper is not running"
-    : "Subtitle unavailable";
-  document.getElementById("errorMessage").textContent =
-    result.message || "字幕获取失败。请确认视频已播放、本地 Whisper 服务已启动。";
+  document.getElementById("errorTitle").textContent = platform
+    ? platform.title
+    : serverDown
+      ? "Local Whisper is not running"
+      : "Subtitle unavailable";
+
+  const parts = [];
+  if (platform) {
+    parts.push(platform.hint);
+    if (serverDown) {
+      parts.push(
+        `本地 Whisper（${result.whisperUrl || "127.0.0.1:8000"}）也没有在运行，所以没有备用字幕来源。`,
+      );
+    }
+  } else {
+    parts.push(
+      result.message || "字幕获取失败。请确认视频已播放、本地 Whisper 服务已启动。",
+    );
+  }
+  document.getElementById("errorMessage").textContent = parts.join("");
+
+  const btn = document.getElementById("errorBtn");
+  if (platform?.reload) {
+    awaitingCaptureGrant = false;
+    btn.textContent = "Reload page & retry";
+    errorAction = reloadTabAndRetryTranscript;
+    setErrorSecondary("Whisper setup guide", openWhisperGuide);
+    return;
+  }
 
   if (serverDown) {
     awaitingCaptureGrant = false;
-    document.getElementById("errorBtn").textContent =
-      "Open Whisper setup guide";
+    btn.textContent = "Open Whisper setup guide";
     errorAction = openWhisperGuide;
     setErrorSecondary(
       "Open Settings",
@@ -1765,7 +1862,6 @@ function showWhisperFallbackError(result) {
   }
 
   awaitingCaptureGrant = result.error === "CAPTURE_NOT_INVOKED";
-  const btn = document.getElementById("errorBtn");
   btn.textContent = awaitingCaptureGrant
     ? "I clicked the icon — retry"
     : "Try Whisper again";

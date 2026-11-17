@@ -50,7 +50,7 @@ test("content script rewrites the signed URL instead of re-signing it", () => {
   // 空响应说明 pot 失效，必须丢弃缓存。
   assert.match(content, /return \{ success: false, reason: "EMPTY", status: resp\.status \}/);
   // 为了拿 URL 而打开的字幕开关，抓完要还原。
-  assert.match(content, /restoreCaptionState\(weEnabled\)/);
+  assert.match(content, /restoreCaptionState\(restoreNeeded\)/);
 });
 
 test("an empty HTTP 200 is treated as failure, not as captions", () => {
@@ -63,7 +63,7 @@ test("an empty HTTP 200 is treated as failure, not as captions", () => {
   // 只看 resp.ok 会把空的 200 当成功，最终让面板掉进 30 秒 Whisper 兜底，
   // 这正是"只拿到一句话"的根因。
   assert.match(body, /if \(body && body\.length > 200\)/);
-  assert.match(body, /requestYoutubeCaptionFromPage\(tabId, trackLangs\)/);
+  assert.match(body, /requestYoutubeCaptionFromPage\(tabId, trackLangs, diagnostics\)/);
 });
 
 test("json3 captions are parsed with their timeline", () => {

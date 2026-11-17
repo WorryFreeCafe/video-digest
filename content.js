@@ -1123,7 +1123,10 @@ function pullCaptionPotUrl() {
 
 /**
  * 让播放器去请求一次字幕文件——它会自动带上 pot。
- * 返回 true 表示字幕开关是我们打开的，抓完需要还原，避免打扰用户。
+ *
+ * 返回 { kicked, restore }：`restore` 表示字幕开关是被我们打开的，抓完要还原；
+ * 原本就开着的情况不能直接 return，否则播放器不会重新请求，钩子又错过首次请求
+ * 时整条 pot 通道永远拿不到 URL（表现为"没有字幕、请开 Whisper"）。
  */
 function kickCaptionRequest() {
   const button = document.querySelector(".ytp-subtitles-button");
@@ -1134,11 +1137,27 @@ function kickCaptionRequest() {
     } catch (_e) {
       /* noop */
     }
-    return false;
+    return { kicked: false, restore: false };
   }
-  if (button.getAttribute("aria-pressed") === "true") return false;
+  if (button.getAttribute("aria-pressed") === "true") {
+    // 关掉再打开，逼播放器重新拉一次 timedtext（带 pot）。
+    try {
+      button.click();
+      setTimeout(() => {
+        try {
+          button.click();
+        } catch (_e) {
+          /* noop */
+        }
+      }, 350);
+    } catch (_e) {
+      /* noop */
+    }
+    // 状态回到用户原本的设置，不需要再还原。
+    return { kicked: true, restore: false };
+  }
   button.click();
-  return true;
+  return { kicked: true, restore: true };
 }
 
 function restoreCaptionState(wasOurs) {
@@ -1150,6 +1169,154 @@ function restoreCaptionState(wasOurs) {
     } catch (_e) {
       /* noop */
     }
+  }
+}
+
+/**
+ * 从页面的 ytInitialData 里找出"显示转录文字"面板的 params。
+ * getTranscriptEndpoint 挂在 engagementPanel 上，位置随页面版本变化，所以
+ * 这里做一次有上限的深度搜索，比写死路径更耐用。
+ * @returns {string}
+ */
+function findTranscriptParams(root, limit = 20000) {
+  const seen = new Set();
+  const stack = [root];
+  let visited = 0;
+  while (stack.length && visited < limit) {
+    const node = stack.pop();
+    if (!node || typeof node !== "object" || seen.has(node)) continue;
+    seen.add(node);
+    visited += 1;
+    const endpoint = node.getTranscriptEndpoint;
+    if (endpoint && typeof endpoint.params === "string" && endpoint.params) {
+      return endpoint.params;
+    }
+    for (const key of Object.keys(node)) {
+      const value = node[key];
+      if (value && typeof value === "object") stack.push(value);
+    }
+  }
+  return "";
+}
+
+/** 收集 get_transcript 返回的 transcriptSegmentRenderer。 */
+function collectTranscriptSegments(root, out = [], limit = 40000) {
+  const seen = new Set();
+  const stack = [root];
+  let visited = 0;
+  while (stack.length && visited < limit) {
+    const node = stack.pop();
+    if (!node || typeof node !== "object" || seen.has(node)) continue;
+    seen.add(node);
+    visited += 1;
+    if (typeof node.startMs === "string" && node.snippet) {
+      out.push(node);
+      continue;
+    }
+    for (const key of Object.keys(node)) {
+      const value = node[key];
+      if (value && typeof value === "object") stack.push(value);
+    }
+  }
+  return out;
+}
+
+/**
+ * 读取 YouTube innertube 需要的上下文（visitorData / 客户端版本 / 语言）。
+ */
+function getInnertubeContext() {
+  const cfg = window.ytcfg;
+  const read = (key, fallback) => {
+    try {
+      if (cfg && typeof cfg.get === "function") {
+        const value = cfg.get(key);
+        if (value) return value;
+      }
+      if (cfg && cfg.data_ && cfg.data_[key]) return cfg.data_[key];
+    } catch (_e) {
+      /* noop */
+    }
+    return fallback;
+  };
+  return {
+    visitorData: read("VISITOR_DATA", ""),
+    clientVersion: read("INNERTUBE_CLIENT_VERSION", "2.20240101.00.00"),
+    hl: read("HL", "en"),
+    gl: read("GL", "US"),
+  };
+}
+
+/**
+ * 调 YouTube 网页版"显示转录文字"用的 inner API 取字幕。
+ *
+ * 这条路不需要 pot（所以不受"扩展更新后旧页面拿不到 pot"影响），只要页面还
+ * 在登录态里。它是 pot 通道全部失败后的最后一道原生字幕兜底，返回 json3 文本
+ * 以复用 background 既有的解析。
+ *
+ * @returns {Promise<{success:boolean, text?:string, reason?:string}>}
+ */
+async function fetchYoutubeTranscriptInner(videoId) {
+  try {
+    if (!videoId) return { success: false, reason: "NO_VIDEO_ID" };
+    const ctx = getInnertubeContext();
+    const context = {
+      client: {
+        clientName: "WEB",
+        clientVersion: ctx.clientVersion,
+        hl: ctx.hl,
+        gl: ctx.gl,
+      },
+    };
+    if (ctx.visitorData) context.client.visitorData = ctx.visitorData;
+
+    const headers = {
+      "Content-Type": "application/json",
+      "X-Youtube-Client-Name": "1",
+      "X-Youtube-Client-Version": ctx.clientVersion,
+    };
+    // 带上 visitorData，未登录会话也能拿到同一份转录。
+    if (ctx.visitorData) headers["X-Goog-Visitor-Id"] = ctx.visitorData;
+
+    let params = findTranscriptParams(window.ytInitialData);
+    if (!params) {
+      // 转录面板的 params 不一定在首屏数据里，用 next 接口补一次。
+      const nextResp = await fetch("/youtubei/v1/next?prettyPrint=false", {
+        method: "POST",
+        credentials: "include",
+        headers,
+        body: JSON.stringify({ context, videoId }),
+      });
+      if (!nextResp.ok) return { success: false, reason: `NEXT_HTTP_${nextResp.status}` };
+      params = findTranscriptParams(await nextResp.json());
+    }
+    if (!params) return { success: false, reason: "NO_TRANSCRIPT_PARAMS" };
+
+    const resp = await fetch("/youtubei/v1/get_transcript?prettyPrint=false", {
+      method: "POST",
+      credentials: "include",
+      headers,
+      body: JSON.stringify({ context, params }),
+    });
+    if (!resp.ok) return { success: false, reason: `TRANSCRIPT_HTTP_${resp.status}` };
+    const data = await resp.json();
+
+    const segments = collectTranscriptSegments(data).sort(
+      (a, b) => Number(a.startMs) - Number(b.startMs),
+    );
+    const events = [];
+    for (const seg of segments) {
+      const runs = seg.snippet?.runs || [];
+      const text = runs
+        .map((r) => (r && r.text) || "")
+        .join("")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text) events.push({ tStartMs: Number(seg.startMs) || 0, segs: [{ utf8: text }] });
+    }
+    if (!events.length) return { success: false, reason: "NO_TRANSCRIPT_EVENTS" };
+    return { success: true, text: JSON.stringify({ events }), lang: "" };
+  } catch (e) {
+    return { success: false, reason: "TRANSCRIPT_API_FAILED" };
   }
 }
 
@@ -1176,19 +1343,40 @@ function pickCaptionLang(currentLang, trackLangs) {
 async function fetchYoutubeCaptionText(trackLangs) {
   const videoId = currentYoutubeVideoId();
   let url = usableCaptionPotUrl();
-  let weEnabled = false;
-
+  let restoreNeeded = false;
   if (!url) {
-    weEnabled = kickCaptionRequest();
-    url = await waitForCaptionPotUrl(9000);
+    const kick = kickCaptionRequest();
+    restoreNeeded = kick.restore;
+    url = await waitForCaptionPotUrl(5000);
     if (!url) url = await pullCaptionPotUrl();
     // 播放器偶尔会比点击慢一拍，再等一小会儿。
-    if (!url) url = await waitForCaptionPotUrl(3000);
+    if (!url) url = await waitForCaptionPotUrl(2000);
   }
 
   try {
-    if (!url) return { success: false, reason: "NO_POT_URL" };
+    let potReason = "";
+    if (url) {
+      const viaPot = await fetchCaptionsFromPotUrl(url, trackLangs, videoId);
+      if (viaPot.success) return viaPot;
+      potReason = viaPot.reason || "POT_FAILED";
+    }
 
+    // pot 通道没成功（没拿到 URL、空响应、解析不出事件）：改用网页版
+    // "显示转录文字"的 inner API。它不需要 pot，因此不受"扩展更新后旧页面
+    // 错过播放器请求"影响。
+    const inner = await fetchYoutubeTranscriptInner(videoId);
+    if (inner.success) return inner;
+    return { success: false, reason: inner.reason || potReason || "NO_POT_URL" };
+  } finally {
+    restoreCaptionState(restoreNeeded);
+  }
+}
+
+/**
+ * 用播放器签过名的 timedtext URL 取整条字幕轨（只改写 lang/fmt）。
+ */
+async function fetchCaptionsFromPotUrl(url, trackLangs, videoId) {
+  try {
     const target = new URL(url);
     const lang = pickCaptionLang(target.searchParams.get("lang"), trackLangs);
     target.searchParams.set("fmt", "json3");
@@ -1217,8 +1405,8 @@ async function fetchYoutubeCaptionText(trackLangs) {
       }
     }
     return { success: true, text, lang };
-  } finally {
-    restoreCaptionState(weEnabled);
+  } catch (_e) {
+    return { success: false, reason: "POT_FETCH_FAILED" };
   }
 }
 

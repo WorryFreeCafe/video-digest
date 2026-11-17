@@ -15,6 +15,26 @@ YouTube Digest is a bring-your-own-key project installed locally from GitHub. It
 
 ![YouTube Digest demo](YouTube%20Digest%20demo.png)
 
+## What is new in v1.3.7
+
+- A caption probe no longer gives up after a single read. The extension waits up
+  to four seconds for the player to expose its caption tracks, so clicking
+  **Digest** right after opening a video no longer falls through to Whisper.
+- Fixed a pot dead end: when YouTube's caption button was already on, the old
+  code skipped its own request and therefore never got a signed URL to read. It
+  now toggles captions off and on so the player fetches the track once.
+- When the signed URL never appears, the content script falls back to YouTube's
+  own `get_transcript` endpoint (the one behind "Show transcript"), which needs no
+  token. Two independent ways to read the same captions.
+- The panel names the real reason captions are missing (no caption track, empty
+  response, page not reloaded after an update, or a signed URL that never arrived)
+  and states the Whisper status next to it. Before, every one of those cases
+  showed up as "Local Whisper is not running", which made it look as if the
+  extension now required Whisper.
+- When the cause is page-side, the main button is **Reload page & retry**: the
+  caption hook runs at `document_start`, so a reload is the only way to restore it
+  on a tab that was already open before an update.
+
 ## What is new in v1.3.6
 
 - The extension now checks the local Whisper server before it starts recording,
@@ -227,8 +247,10 @@ transcript service in the loop, so a failed probe costs nothing:
    proof-of-origin token and answers `HTTP 200` with an empty body when the token
    is missing. `caption-pot-hook.js` records the signed URL the player itself
    requests, so the content script can download the full track with its real
-   timeline. Bilibili's API needs a signed-in session; when logged out it returns
-   nothing.
+   timeline. If that signed URL never shows up, the content script asks YouTube's
+   `get_transcript` endpoint instead (the one behind the "Show transcript"
+   panel), which needs no token. Bilibili's API needs a signed-in session; when logged
+   out it returns nothing.
 
 2. **No native subtitle, local Whisper transcription (optional).** If no
    platform caption exists and you enable **Local Whisper** in Settings, the

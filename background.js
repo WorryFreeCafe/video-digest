@@ -677,9 +677,13 @@ async function getPlayerVideoDetails(tabId) {
       func: () => {
         try {
           const player = document.getElementById("movie_player");
-          const details = player?.getPlayerResponse?.()?.videoDetails;
-          const caps = player?.getPlayerResponse?.()?.captions;
-          const tracks = caps?.playerCaptionsTracklistRenderer?.captionTracks;
+          const fromPlayer = player?.getPlayerResponse?.();
+          // 播放器对象存在、但 captions 还没跟着换页更新时（YouTube 会先渲染
+          // 页面再补 player data），页面级快照仍是另一个可用来源。
+          const fromPage = window.ytInitialPlayerResponse || null;
+          const captions = fromPlayer?.captions || fromPage?.captions;
+          const details = fromPlayer?.videoDetails || fromPage?.videoDetails;
+          const tracks = captions?.playerCaptionsTracklistRenderer?.captionTracks;
           const captionTracks = Array.isArray(tracks)
             ? tracks.map((t) => ({ baseUrl: t.baseUrl || "", lang: t.languageCode || "" }))
             : [];
@@ -717,9 +721,10 @@ async function getPlayerVideoDetails(tabId) {
  */
 async function handleFetchTranscriptSmart(videoId, tabId) {
   const settings = await getSettings();
+  const diagnostics = {};
 
   // 1) 平台原生字幕预检（免费）
-  const platform = await probePlatformSubtitle(videoId, tabId, settings);
+  const platform = await probePlatformSubtitle(videoId, tabId, settings, diagnostics);
   if (platform && platform.success !== false && platform.transcript?.length) {
     return YTD_SUBTITLE_SOURCES.sourceResult("platform", {
       transcript: platform.transcript,
@@ -729,6 +734,11 @@ async function handleFetchTranscriptSmart(videoId, tabId) {
       note: "来自平台原生字幕。",
     });
   }
+
+  // 平台这一侧为什么没成功，必须一起带回去：否则面板只会看到 Whisper 的
+  // 错误，用户会以为插件"现在必须先开本地 Whisper"。
+  const platformFailure = diagnostics.platformFailure || "NO_CAPTION_TRACKS";
+  const platformDetail = diagnostics.platformDetail || "";
 
   // 2) 本地 Whisper 音频转录兜底（若用户已启用）
   if (settings.whisperEnabled && tabId) {
@@ -754,6 +764,8 @@ async function handleFetchTranscriptSmart(videoId, tabId) {
       // 一句笼统的失败提示。
       canOpenWhisperGuide: !!whisper?.canOpenWhisperGuide,
       whisperUrl: whisper?.whisperUrl || settings.whisperServerUrl,
+      platformFailure,
+      platformDetail,
     });
   }
 
@@ -766,17 +778,11 @@ async function handleFetchTranscriptSmart(videoId, tabId) {
     canEnableWhisper: true,
     canOpenWhisperGuide: true,
     whisperUrl: settings.whisperServerUrl,
+    platformFailure,
+    platformDetail,
   });
 }
 
-/**
- * 探测平台原生字幕（免费通道）。
- * 通过 content script 收集页面信息：
- *   - YouTube：页面脚本可读 captionTracks（由 getPlayerVideoDetails 顺带处理）
- *   - B站：读取 cid，再调 B站字幕接口
- *   - 通用 html：探测 video.textTracks
- * @returns {Object|null}
- */
 /**
  * 把"已构建好的字幕对象"包成统一来源结构。
  *
@@ -798,8 +804,47 @@ function asPlatformResult(built, note) {
   });
 }
 
-async function probePlatformSubtitle(videoId, tabId, settings) {
-  if (!tabId) return null;
+/**
+ * 等 YouTube 的字幕轨就绪。
+ *
+ * 用户经常是"刚打开视频就点 Digest"，此时播放器 data 还没带上 captions，
+ * 一次读取失败并不代表视频没有字幕。之前这里只读一次，读不到就直接掉到
+ * Whisper 兜底，于是同一视频"有时能出字幕、有时报 Whisper 没启动"。
+ *
+ * @param {number} tabId
+ * @param {number} [timeoutMs]
+ * @returns {Promise<{tracks: Array, player: Object|null}>}
+ */
+async function waitForCaptionTracks(tabId, timeoutMs = 4000) {
+  const deadline = Date.now() + timeoutMs;
+  let player = null;
+  while (true) {
+    player = await getPlayerVideoDetails(tabId);
+    const tracks = (player && player.captionTracks) || [];
+    if (tracks.length) return { tracks, player };
+    if (Date.now() >= deadline) return { tracks: [], player };
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+}
+
+/**
+ * 探测平台原生字幕（免费通道）。
+ *
+ * `diagnostics` 用来把"为什么没拿到字幕"带回面板。失败时只显示 Whisper 的
+ * 错误会让用户误以为插件变成了 Whisper 依赖，实际原因常常在平台这一侧
+ * （页面没加载完、扩展更新后未刷新、视频确实没有字幕轨）。
+ *
+ * @param {string} videoId
+ * @param {number} tabId
+ * @param {Object} settings
+ * @param {Object} [diagnostics]
+ * @returns {Object|null}
+ */
+async function probePlatformSubtitle(videoId, tabId, settings, diagnostics = {}) {
+  if (!tabId) {
+    diagnostics.platformFailure = "NO_TAB";
+    return null;
+  }
 
   // 取得当前标签页的站点信息
   let pageUrl = "";
@@ -807,6 +852,7 @@ async function probePlatformSubtitle(videoId, tabId, settings) {
     const tab = await chrome.tabs.get(tabId);
     pageUrl = tab.url || "";
   } catch (_e) {
+    diagnostics.platformFailure = "NO_TAB";
     return null;
   }
   const site = YTD_SUBTITLE_SOURCES.detectSite(pageUrl);
@@ -840,9 +886,13 @@ async function probePlatformSubtitle(videoId, tabId, settings) {
   // YouTube：优先尝试页面 captionTracks（免费），失败则交由调用方决定
   // 这里尝试从 player 取字幕轨道。
   try {
-    const player = await getPlayerVideoDetails(tabId);
-    const tracks = (player && player.captionTracks) || [];
-    if (!tracks.length) return null;
+    const { tracks } = await waitForCaptionTracks(tabId);
+    if (!tracks.length) {
+      // 视频本身没有字幕轨，和"有字幕但取不到"是两种完全不同的处境，
+      // 面板要给不同的提示。
+      diagnostics.platformFailure = "NO_CAPTION_TRACKS";
+      return null;
+    }
     const trackLangs = tracks.map((t) => t.lang).filter(Boolean);
 
     // 1) 直接请求 baseUrl。YouTube 现在对没有 pot（proof-of-origin token）
@@ -863,15 +913,19 @@ async function probePlatformSubtitle(videoId, tabId, settings) {
               );
             }
           }
+          diagnostics.platformFailure = "EMPTY_CAPTION_BODY";
+        } else {
+          diagnostics.platformFailure = `CAPTION_HTTP_${resp.status}`;
         }
-      } catch (_e) {
-        /* 继续尝试 pot 通道 */
+      } catch (e) {
+        diagnostics.platformFailure = "CAPTION_FETCH_FAILED";
+        diagnostics.platformDetail = String(e?.message || e);
       }
     }
 
     // 2) pot 通道：让页面交出播放器自己带签名的 timedtext URL，
     //    改写 lang 后即可拿到整条字幕轨（含完整时间轴）。
-    const potResult = await requestYoutubeCaptionFromPage(tabId, trackLangs);
+    const potResult = await requestYoutubeCaptionFromPage(tabId, trackLangs, diagnostics);
     if (potResult && potResult.success) {
       const parsed = parseYoutubeCaptionBody(potResult.text);
       if (parsed.length) {
@@ -882,9 +936,12 @@ async function probePlatformSubtitle(videoId, tabId, settings) {
           "来自 YouTube 原生字幕。",
         );
       }
+      diagnostics.platformFailure = "EMPTY_CAPTION_BODY";
     }
     return null;
-  } catch (_e) {
+  } catch (e) {
+    diagnostics.platformFailure = "PLATFORM_PROBE_FAILED";
+    diagnostics.platformDetail = String(e?.message || e);
     return null;
   }
 }
@@ -893,7 +950,7 @@ async function probePlatformSubtitle(videoId, tabId, settings) {
  * 请内容脚本用播放器带 pot 的 URL 取全量字幕。
  * 内容脚本跑在页面上下文里，带得上 cookie，也能读到播放器请求过的 URL。
  */
-async function requestYoutubeCaptionFromPage(tabId, trackLangs) {
+async function requestYoutubeCaptionFromPage(tabId, trackLangs, diagnostics = {}) {
   const ask = async () => {
     try {
       return await chrome.tabs.sendMessage(tabId, {
@@ -902,6 +959,7 @@ async function requestYoutubeCaptionFromPage(tabId, trackLangs) {
       });
     } catch (_e) {
       // 内容脚本未注入（扩展刚更新、页面还没刷新）时 sendMessage 会抛错。
+      diagnostics.platformFailure = "CONTENT_SCRIPT_MISSING";
       return null;
     }
   };
@@ -917,6 +975,10 @@ async function requestYoutubeCaptionFromPage(tabId, trackLangs) {
   if (!res || !res.success) {
     if (res && res.reason) {
       debugLog("[YouTube Digest BG] Caption pot path failed:", res.reason);
+      // 内容脚本在，但播放器没交出带 pot 的 URL：最常见的成因是页面在
+      // 扩展更新前就打开了，钩子错过了播放器的字幕请求。
+      diagnostics.platformFailure =
+        res.reason === "NO_POT_URL" ? "POT_UNAVAILABLE" : res.reason;
     }
     return null;
   }
