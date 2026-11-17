@@ -13,7 +13,7 @@
 
 // Import safe defaults and validation helpers. Secret keys live in
 // chrome.storage.local and are never part of the extension source.
-importScripts("settings.js", "subtitle-sources.js");
+importScripts("settings.js", "subtitle-sources.js", "whisper-client.js");
 
 const DEBUG = false;
 const AI_PROVIDER_IDLE_TIMEOUT_MS = 50_000;
@@ -401,6 +401,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === "whisperHealth") {
+    // 设置页的“检查连接”，也用于面板在转录前确认服务是否在线。
+    handleWhisperHealth(message.url)
+      .then(sendResponse)
+      .catch((err) =>
+        sendResponse({
+          ok: false,
+          status: "error",
+          message: `探活失败：${err.message}`,
+        }),
+      );
+    return true;
+  }
+
+  if (message.action === "openWhisperGuide") {
+    // 安装 / 启动指南是扩展自带页面，离线可用。
+    chrome.tabs
+      .create({ url: chrome.runtime.getURL("whisper-guide.html") })
+      .then((tab) => sendResponse({ ok: true, tabId: tab?.id }))
+      .catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
   if (message.action === "analyzeTranscript") {
     // Pass video duration to help the AI validate timestamps
     handleAnalyzeTranscript(
@@ -727,6 +750,10 @@ async function handleFetchTranscriptSmart(videoId, tabId) {
       message:
         whisper?.message ||
         "无原生字幕，且本地 Whisper 转录失败。请确认视频正在播放、Whisper 服务已启动后重试。",
+      // 让面板能把"服务没启动"变成一个可直接点开的安装/启动指南，而不是
+      // 一句笼统的失败提示。
+      canOpenWhisperGuide: !!whisper?.canOpenWhisperGuide,
+      whisperUrl: whisper?.whisperUrl || settings.whisperServerUrl,
     });
   }
 
@@ -737,6 +764,8 @@ async function handleFetchTranscriptSmart(videoId, tabId) {
     message:
       "该视频未检测到原生字幕，且未启用本地 Whisper。请在设置中开启本地 Whisper 后重试。",
     canEnableWhisper: true,
+    canOpenWhisperGuide: true,
+    whisperUrl: settings.whisperServerUrl,
   });
 }
 
@@ -1074,6 +1103,40 @@ function parseYoutubeCaptionXml(xml) {
 }
 
 /**
+ * 本地 Whisper 服务是用户自己启动的进程，随时可能没开或地址不对。
+ * 探活逻辑放在 whisper-client.js，这里只负责和设置联动。
+ */
+let whisperClientInstance = null;
+
+/** 惰性创建：让没有加载 whisper-client.js 的测试沙箱也能加载本文件。 */
+function getWhisperClient() {
+  if (!whisperClientInstance) {
+    whisperClientInstance = YTD_WHISPER_CLIENT.createWhisperClient();
+  }
+  return whisperClientInstance;
+}
+
+/**
+ * 读取当前设置并探活，供设置页“检查连接”和面板预检共用。
+ * `urlOverride` 让设置页可以先改地址再检查，不必先保存。
+ * 永远返回结构化结果，调用方不需要区分“服务没开”和“请求抛异常”。
+ * @param {string} [urlOverride]
+ * @returns {Promise<Object>}
+ */
+async function handleWhisperHealth(urlOverride) {
+  const settings = await getSettings();
+  const targetUrl =
+    String(urlOverride || "").trim() || settings.whisperServerUrl;
+  const probe = await getWhisperClient().probe(targetUrl);
+  return {
+    ...probe,
+    enabled: !!settings.whisperEnabled,
+    configuredUrl: settings.whisperServerUrl,
+    configuredModel: settings.whisperModel,
+  };
+}
+
+/**
  * 捕获当前标签页音频并交给本地 Whisper 转录。
  *
  * Chrome MV3 的 service worker 没有 DOM，也就没有 getUserMedia/MediaRecorder。
@@ -1124,6 +1187,23 @@ async function handleCaptureAudioTranscribe(tabId, settings = null, opts = {}) {
   }
 
   const seconds = Math.min(Math.max(Number(opts.seconds) || 30, 5), 120);
+
+  // 探活放在录音之前：服务没启动时立刻返回可操作的提示，而不是让用户先等
+  // 30 秒录音、再收到一句 "Failed to fetch"。`http-error` / `unexpected`
+  // 说明地址上有服务在响应但不像 whisper_server.py，交给后面的真实请求判断，
+  // 避免把用户自建的服务误判为不可用。
+  const probe = await getWhisperClient().probe(cfg.whisperServerUrl);
+  if (!probe.ok && (probe.status === "unreachable" || probe.status === "timeout")) {
+    return {
+      success: false,
+      source: "whisper",
+      error: probe.status === "timeout" ? "WHISPER_TIMEOUT" : "WHISPER_UNREACHABLE",
+      whisperUrl: probe.url,
+      canOpenWhisperGuide: true,
+      message: `${probe.message} 启动后回到面板重试，或打开安装指南。`,
+    };
+  }
+
   try {
     const text = await captureViaOffscreen(tabId, {
       seconds,

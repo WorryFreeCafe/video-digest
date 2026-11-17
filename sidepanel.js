@@ -36,6 +36,7 @@ const DIGEST_CACHE_VERSION = 2;
 
 let youtubeTabId = null; // Store the YouTube tab ID for reliable messaging
 let errorAction = null;
+let errorSecondaryAction = null;
 // True when the last capture failed only because Chrome had not yet granted
 // activeTab; the panel then auto-retries as soon as the user invokes the icon.
 let awaitingCaptureGrant = false;
@@ -435,6 +436,10 @@ function setupEventListeners() {
       startDigest(currentVideoId, currentVideoUrl);
     }
   });
+
+  document
+    .getElementById("errorSecondaryBtn")
+    ?.addEventListener("click", () => errorSecondaryAction?.());
 
   document.getElementById("settingsBtn")?.addEventListener("click", () => {
     chrome.runtime.sendMessage({ action: "openOptions" });
@@ -1682,8 +1687,25 @@ function updateLoading(title, subtitle) {
   document.getElementById("loadingSubtext").textContent = subtitle;
 }
 
+/**
+ * 主按钮下方的次要操作。本地 Whisper 没启动时，主按钮给安装指南，次要按钮才
+ * 是去设置；没有合适的主次关系时传空字符串即可隐藏。
+ */
+function setErrorSecondary(label, action) {
+  const btn = document.getElementById("errorSecondaryBtn");
+  if (!btn) return;
+  errorSecondaryAction = action || null;
+  btn.textContent = label || "";
+  btn.hidden = !label || !action;
+}
+
+function openWhisperGuide() {
+  return chrome.runtime.sendMessage({ action: "openWhisperGuide" });
+}
+
 function showError(title, message) {
   errorAction = null;
+  setErrorSecondary(null);
   showState("error");
   document.getElementById("errorTitle").textContent = title;
   document.getElementById("errorMessage").textContent = message;
@@ -1691,7 +1713,8 @@ function showError(title, message) {
 }
 
 /**
- * 无原生字幕时的提示：唯一可用的补救方式是本地 Whisper，直接引导去设置。
+ * 无原生字幕时的提示：唯一可用的补救方式是本地 Whisper，直接引导去设置，
+ * 并给一个安装/启动指南的入口（很多人卡在“服务没启动”这一步）。
  */
 function showSubtitleFallbackError(result) {
   awaitingCaptureGrant = false;
@@ -1704,22 +1727,42 @@ function showSubtitleFallbackError(result) {
   const btn = document.getElementById("errorBtn");
   btn.textContent = "Open Settings";
   errorAction = () => chrome.runtime.sendMessage({ action: "openOptions" });
+  setErrorSecondary("How to install and start Whisper", openWhisperGuide);
 }
 
 /**
  * 无字幕且 Whisper 转录失败时的提示。
  *
- * CAPTURE_NOT_INVOKED 是 Chrome 的授权限制，不是故障：扩展必须先在该标签页
- * 被用户主动调用一次（点工具栏图标 / 快捷键）才会授予 tabCapture。此时把重试
- * 变成"自动续跑"——用户点 icon 后 background 广播 extensionInvoked，这里立刻
- * 重新采集，不用再回面板点第二次。
+ * 两种情况分开处理：
+ *   - WHISPER_UNREACHABLE / WHISPER_TIMEOUT：服务没启动或地址不对，重试没有
+ *     意义，主按钮直接给安装/启动指南。
+ *   - CAPTURE_NOT_INVOKED 是 Chrome 的授权限制，不是故障：扩展必须先在该标签页
+ *     被用户主动调用一次（点工具栏图标 / 快捷键）才会授予 tabCapture。此时把重试
+ *     变成"自动续跑"——用户点 icon 后 background 广播 extensionInvoked，这里立刻
+ *     重新采集，不用再回面板点第二次。
  */
 function showWhisperFallbackError(result) {
   showState("error");
-  document.getElementById("errorTitle").textContent =
-    "Subtitle unavailable";
+  const serverDown =
+    result.error === "WHISPER_UNREACHABLE" || result.error === "WHISPER_TIMEOUT";
+
+  document.getElementById("errorTitle").textContent = serverDown
+    ? "Local Whisper is not running"
+    : "Subtitle unavailable";
   document.getElementById("errorMessage").textContent =
     result.message || "字幕获取失败。请确认视频已播放、本地 Whisper 服务已启动。";
+
+  if (serverDown) {
+    awaitingCaptureGrant = false;
+    document.getElementById("errorBtn").textContent =
+      "Open Whisper setup guide";
+    errorAction = openWhisperGuide;
+    setErrorSecondary(
+      "Open Settings",
+      () => chrome.runtime.sendMessage({ action: "openOptions" }),
+    );
+    return;
+  }
 
   awaitingCaptureGrant = result.error === "CAPTURE_NOT_INVOKED";
   const btn = document.getElementById("errorBtn");
@@ -1734,6 +1777,10 @@ function showWhisperFallbackError(result) {
     });
     applyTranscriptResult(r);
   };
+  setErrorSecondary(
+    result.canOpenWhisperGuide ? "Whisper setup guide" : "",
+    result.canOpenWhisperGuide ? openWhisperGuide : null,
+  );
 }
 
 /**
@@ -1760,6 +1807,15 @@ async function retryCaptureAfterInvoke(tabId) {
  */
 async function applyTranscriptResult(transcriptResult) {
   if (!transcriptResult || !transcriptResult.success) {
+    // 手动重试走的是这条路：如果失败原因是 Whisper 服务没起来，要给出指南入口，
+    // 而不是退回笼统的 "No transcript found"。
+    if (
+      transcriptResult?.source === "whisper" ||
+      /^WHISPER_/.test(String(transcriptResult?.error || ""))
+    ) {
+      showWhisperFallbackError(transcriptResult);
+      return;
+    }
     showError(
       "No transcript found",
       transcriptResult?.message || transcriptResult?.error,
@@ -1787,6 +1843,7 @@ function showConfigError(configStatus) {
   if (!configStatus.hasAiKey) missingKeys.push("AI provider");
 
   showState("error");
+  setErrorSecondary(null);
   document.getElementById("errorTitle").textContent = "API Keys Missing";
   document.getElementById("errorMessage").textContent =
     `Add your ${missingKeys.join(" and ")} API key${missingKeys.length === 1 ? "" : "s"} in YouTube Digest Settings.`;

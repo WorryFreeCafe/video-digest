@@ -1142,6 +1142,31 @@ body {
   transform: translateY(-1px);
 }
 
+/* Quiet secondary action under the main button, e.g. "Open Settings"
+   when the primary action is opening the Whisper setup guide. */
+.error-link-btn {
+  margin-top: -8px;
+  padding: 4px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+  transition: color 0.16s ease;
+}
+
+.error-link-btn:hover {
+  color: var(--accent);
+}
+
+.error-link-btn[hidden] {
+  display: none;
+}
+
 /* ============================================================
    WELCOME STATE (no video detected)
    ============================================================ */

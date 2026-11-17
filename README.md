@@ -15,6 +15,22 @@ YouTube Digest is a bring-your-own-key project installed locally from GitHub. It
 
 ![YouTube Digest demo](YouTube%20Digest%20demo.png)
 
+## What is new in v1.3.6
+
+- The extension now checks the local Whisper server before it starts recording,
+  instead of discovering a closed port after 30 seconds of audio. A dead server
+  comes back as `WHISPER_UNREACHABLE` in about a second.
+- The side panel turns that result into an action: the title says the server is
+  not running and the main button opens a built-in setup guide, with Settings as
+  the secondary action.
+- Settings has a **Check connection** button next to the Whisper fields. It
+  reports the model and response time, or explains the failure (nothing
+  listening, timeout, another service on the port) without needing a saved page.
+- New in-extension page, `whisper-guide.html`, explaining how tab audio reaches
+  faster-whisper, the install and start commands, a model comparison, and a
+  troubleshooting table. It works offline and switches between English and
+  Chinese.
+
 ## What is new in v1.3.5
 
 - The transcript header (title, **Copy**, **Export**) now sticks to the top of
@@ -233,7 +249,10 @@ python whisper/whisper_server.py --model small --port 8000
 ```
 
 Then in Settings, enable **Local Whisper** and keep the default server URL
-`http://127.0.0.1:8000`. Note the same limitation as always: DRM / encrypted
+`http://127.0.0.1:8000`. Press **Check connection**: it should report the model
+and a response time. The full walkthrough, including the model table and a
+troubleshooting list, ships with the extension as `whisper-guide.html` (linked
+from Settings, and opened by the panel when the server is down). Note the same limitation as always: DRM / encrypted
 streams and videos that have not started playing cannot be captured, so this
 fallback only helps for playable, unencrypted videos.
 
