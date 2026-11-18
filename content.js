@@ -45,6 +45,12 @@ let biliFullscreenListenerAdded = false;
 let biliButtonPositionRaf = null;
 let biliLastButtonLayout = "";
 let biliPositionListenersAdded = false;
+let biliActionsVisible = false;
+let biliActionsHideTimer = null;
+let biliActionsVisibilityTimer = null;
+let biliPointerInside = false;
+let biliPointerRaf = null;
+let biliPeekedHref = "";
 
 // The two B站 buttons float over the player's top-right corner. They are kept
 // out of B站's own containers on purpose: the watch page is Vue-hydrated, and
@@ -511,15 +517,31 @@ function initBilibili() {
       passive: true,
     });
     window.addEventListener("resize", scheduleBilibiliButtonPosition);
+    // 浮层的显隐跟着指针走：鼠标在画面上才出现。
+    document.addEventListener("mousemove", handleBilibiliPointerMove, {
+      passive: true,
+    });
+    // 鼠标移出浏览器窗口时不会再收到 mousemove，这里补一次收起。
+    document.addEventListener("mouseleave", () => {
+      biliPointerInside = false;
+      scheduleBilibiliActionsHide(120);
+    });
     biliPositionListenersAdded = true;
   }
 
   if (!biliFullscreenListenerAdded) {
     document.addEventListener("fullscreenchange", () => {
-      const hidden = document.fullscreenElement ? "none" : "";
-      for (const button of [biliDigestButton, biliNoteButton]) {
-        if (button) button.style.display = hidden;
+      const bar = document.getElementById(BILIBILI_ACTIONS_ID);
+      if (!bar) return;
+      if (document.fullscreenElement) {
+        setBilibiliActionsVisible(false);
+        bar.style.display = "none";
+        return;
       }
+      // 退出全屏后播放器尺寸变了，缓存的 layout 必须先失效再重算。
+      biliLastButtonLayout = "";
+      bar.style.display = "";
+      positionBilibiliButtons();
     });
     biliFullscreenListenerAdded = true;
   }
@@ -563,9 +585,13 @@ function bilibiliButtonStyle() {
 function attachBilibiliButtonHover(button) {
   button.addEventListener("mouseenter", () => {
     button.style.background = "#b25742";
+    // 指针从播放器移到按钮上时，播放器会先发 pointerleave；这里把延迟隐藏取消，
+    // 否则手还没点到按钮，浮层就淡出了。
+    setBilibiliActionsVisible(true);
   });
   button.addEventListener("mouseleave", () => {
     button.style.background = "#c8674f";
+    scheduleBilibiliActionsHide();
   });
 }
 
@@ -581,8 +607,86 @@ function createBilibiliActionsBar() {
     align-items: center;
     gap: ${BILIBILI_BUTTON_GAP}px;
     pointer-events: none;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.16s ease;
   `;
   return bar;
+}
+
+/**
+ * 浮层默认隐藏，只在鼠标进入播放器（或停在按钮上）时浮现。
+ *
+ * 之前它常驻在画面右上角，虽然位置正确，但一整块按钮压在视频上非常碍眼。
+ * 现在跟 YouTube 的 Note 按钮行为一致：指针进播放器才出现，离开后淡出。
+ * 指针进入播放器时先取消未执行的隐藏，避免"移向按钮"这一下被判定为离开。
+ */
+function setBilibiliActionsVisible(visible) {
+  const bar = document.getElementById(BILIBILI_ACTIONS_ID);
+  if (!bar) return;
+  if (visible && biliActionsHideTimer) {
+    clearTimeout(biliActionsHideTimer);
+    biliActionsHideTimer = null;
+  }
+  if (biliActionsVisible === visible) return;
+  biliActionsVisible = visible;
+
+  if (visible) {
+    if (biliActionsVisibilityTimer) {
+      clearTimeout(biliActionsVisibilityTimer);
+      biliActionsVisibilityTimer = null;
+    }
+    bar.style.visibility = "visible";
+    // 先可见再改 opacity，否则隐藏状态下的过渡不会跑，会直接"跳"出来。
+    requestAnimationFrame(() => {
+      if (biliActionsVisible) bar.style.opacity = "1";
+    });
+    return;
+  }
+
+  bar.style.opacity = "0";
+  // 淡出结束后才真正隐藏，这样按钮也不会留在 Tab 焦点顺序里。
+  biliActionsVisibilityTimer = setTimeout(() => {
+    biliActionsVisibilityTimer = null;
+    if (!biliActionsVisible) bar.style.visibility = "hidden";
+  }, 180);
+}
+
+function scheduleBilibiliActionsHide(delay = 260) {
+  if (biliActionsHideTimer) clearTimeout(biliActionsHideTimer);
+  biliActionsHideTimer = setTimeout(() => {
+    biliActionsHideTimer = null;
+    // 指针还停在画面上就不收。各类延迟收起（按钮 mouseleave、首次露面的
+    // 计时器）都可能在手还停在画面上时到点，统一在这里兜一次。
+    if (biliPointerInside) return;
+    setBilibiliActionsVisible(false);
+  }, delay);
+}
+
+/**
+ * 用指针坐标判断"在不在画面上"，而不是监听播放器的 mouseenter。
+ *
+ * 原因是 mouseenter 只在"从外部进入"时才发：页面刷新后鼠标往往原地不动地
+ * 停在视频区域，此时既没有 enter 也没有 leave，按钮就再也不会浮现。改成在
+ * document 上被动监听 mousemove、每帧最多判定一次坐标，刷新后动一下鼠标即可。
+ * （B站 播放器会对拖进度条做 pointer capture，pointerleave 也会丢，这里一并避开。）
+ */
+function handleBilibiliPointerMove(event) {
+  if (biliPointerRaf) return;
+  const x = event.clientX;
+  const y = event.clientY;
+  biliPointerRaf = requestAnimationFrame(() => {
+    biliPointerRaf = null;
+    const player = findBilibiliPlayer();
+    if (!player) return;
+    const rect = player.getBoundingClientRect();
+    const inside =
+      x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    if (inside === biliPointerInside) return;
+    biliPointerInside = inside;
+    if (inside) setBilibiliActionsVisible(true);
+    else scheduleBilibiliActionsHide();
+  });
 }
 
 /**
@@ -623,9 +727,11 @@ function createBilibiliNoteButton() {
   button.style.cssText = `${bilibiliButtonStyle()} background: #3d3a36; pointer-events: auto;`;
   button.addEventListener("mouseenter", () => {
     button.style.background = "#2c2a27";
+    setBilibiliActionsVisible(true);
   });
   button.addEventListener("mouseleave", () => {
     button.style.background = "#3d3a36";
+    scheduleBilibiliActionsHide();
   });
   button.addEventListener("click", async (e) => {
     e.preventDefault();
@@ -661,6 +767,11 @@ function positionBilibiliButtons() {
     rect.bottom > 80 &&
     rect.top < window.innerHeight - 80;
 
+  // 播放器滚出视口或全屏时整条浮层收起；回到视口后只有在指针仍停在画面上
+  // 才重新浮现——否则滚动一屏就会把按钮"甩"回常驻状态。
+  if (!inView) setBilibiliActionsVisible(false);
+  else if (biliPointerInside) setBilibiliActionsVisible(true);
+
   const top = Math.max(12, Math.round(rect.top) + 16);
   const right = Math.max(12, Math.round(window.innerWidth - rect.right) + 16);
   const layout = `${inView ? 1 : 0}:${top}:${right}`;
@@ -688,6 +799,30 @@ function removeBilibiliButtons() {
   biliDigestButton = null;
   biliNoteButton = null;
   biliLastButtonLayout = "";
+  // 节点没了，可见状态必须归零，否则重新注入的新浮层会因为"状态没变"而
+  // 一直停在 opacity:0。
+  if (biliActionsHideTimer) {
+    clearTimeout(biliActionsHideTimer);
+    biliActionsHideTimer = null;
+  }
+  if (biliActionsVisibilityTimer) {
+    clearTimeout(biliActionsVisibilityTimer);
+    biliActionsVisibilityTimer = null;
+  }
+  biliActionsVisible = false;
+  biliPointerInside = false;
+}
+
+/**
+ * 每个视频第一次挂上浮层时，让它浮现 2.6 秒再淡出。
+ * 纯 hover 触发的话，第一次用的人根本不知道这里有按钮；露一次面成本很低。
+ */
+function peekBilibiliActions() {
+  const href = window.location.href.split("#")[0];
+  if (biliPeekedHref === href) return;
+  biliPeekedHref = href;
+  setBilibiliActionsVisible(true);
+  scheduleBilibiliActionsHide(2600);
 }
 
 function injectBilibiliButtons() {
@@ -722,6 +857,7 @@ function injectBilibiliButtons() {
   fresh.append(biliDigestButton, biliNoteButton);
   document.body.appendChild(fresh);
   positionBilibiliButtons();
+  peekBilibiliActions();
   return true;
 }
 
@@ -958,7 +1094,7 @@ function handleNoteKeyboardShortcut(e) {
   e.stopPropagation();
 
   if (YTD_PAGE_SITE === "bilibili") {
-    // B站 has no hover-reveal button, so save straight from the shortcut.
+    // B站 的浮层是 hover 才出现的，快捷键不该依赖它是否可见。
     saveCurrentNote(biliNoteButton);
     return;
   }

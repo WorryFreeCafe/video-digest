@@ -15,6 +15,16 @@ YouTube Digest is a bring-your-own-key project installed locally from GitHub. It
 
 ![YouTube Digest demo](YouTube%20Digest%20demo.png)
 
+## What is new in v1.3.9
+
+- The Bilibili overlay no longer sits on the picture. It fades in only while the
+  pointer is over the player and fades out when the pointer leaves, so the video
+  frame stays clean. It shows once for a couple of seconds after a page loads so
+  the buttons remain discoverable.
+- Pointer tracking is coordinate based rather than `mouseenter`: reloading the
+  page with the cursor already parked on the video used to leave the buttons
+  unreachable until the cursor left the player and came back.
+
 ## What is new in v1.3.8
 
 - Bilibili has a **Note** button now, next to **Digest**. The content script used

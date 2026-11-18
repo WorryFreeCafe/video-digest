@@ -68,9 +68,44 @@ test("the Bilibili button waits for hydration and stays out of fullscreen", () =
   // document_idle 时 B站 的 hydration 还没结束，必须延后注入。
   assert.match(init, /window\.addEventListener\("load", \(\) => setTimeout\(start, 700\)/);
   assert.match(init, /setTimeout\(start, 700\)/);
-  // 全屏播放时浮层不该盖在视频上。
-  assert.match(init, /document\.fullscreenElement \? "none" : ""/);
+  // 全屏播放时浮层不该盖在视频上：整条 bar 收起来，退出全屏再重算位置。
+  assert.match(init, /if \(document\.fullscreenElement\) \{[\s\S]*?bar\.style\.display = "none";/);
+  assert.match(init, /biliLastButtonLayout = "";\s*\n\s*bar\.style\.display = "";/);
 });
+
+test("the Bilibili overlay stays hidden until the pointer enters the player", () => {
+  const content = read("content.js");
+
+  // 默认不可见：常驻会挡住画面。
+  const bar = content.slice(
+    content.indexOf("function createBilibiliActionsBar"),
+    content.indexOf("function setBilibiliActionsVisible"),
+  );
+  assert.match(bar, /opacity: 0;/);
+  assert.match(bar, /visibility: hidden;/);
+
+  // 指针进播放器才显示，离开后延迟淡出（延迟是为了让手能移到按钮上）。
+  assert.match(content, /document\.addEventListener\("mousemove", handleBilibiliPointerMove/);
+  assert.match(content, /if \(inside\) setBilibiliActionsVisible\(true\);/);
+  assert.match(content, /else scheduleBilibiliActionsHide\(\);/);
+
+  // 判定必须基于坐标而不是 mouseenter：页面刷新后指针常常原地不动地停在
+  // 画面上，那种情况 mouseenter 永远不会触发。
+  const move = content.slice(
+    content.indexOf("function handleBilibiliPointerMove"),
+    content.indexOf("function peekBilibiliActions"),
+  );
+  assert.match(move, /const inside =[\s\S]*?rect\.left[\s\S]*?rect\.right/);
+  assert.doesNotMatch(content, /player\.addEventListener\("mouseenter"/);
+
+  // 播放器滚出视口时收起，回到视口也不自动弹出（除非指针仍在画面上）。
+  const position = content.slice(
+    content.indexOf("function positionBilibiliButtons"),
+    content.indexOf("function scheduleBilibiliButtonPosition"),
+  );
+  assert.match(position, /if \(!inView\) setBilibiliActionsVisible\(false\);/);
+});
+
 
 test("the floating Bilibili button opens the side panel", () => {
   const content = read("content.js");
