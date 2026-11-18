@@ -15,6 +15,22 @@ YouTube Digest is a bring-your-own-key project installed locally from GitHub. It
 
 ![YouTube Digest demo](YouTube%20Digest%20demo.png)
 
+## What is new in v1.3.8
+
+- Bilibili has a **Note** button now, next to **Digest**. The content script used
+  to return early for Bilibili, so the only overlay there was Digest.
+- Both Bilibili buttons sit at the player's top-right corner. The Digest button
+  used to sit at the bottom-right of the window, on top of the recommendation
+  list, where it read as part of the page rather than as an extension control.
+- A note no longer requires a prior digest. When the digest cache is missing, the
+  background reads that tab's platform captions instead of failing with
+  `NO_CACHED_TRANSCRIPT`.
+- Bilibili note links point at the Bilibili video and keep the part number
+  (`?p=2&t=95`), so a multi-part note reopens the right part. Tracking
+  parameters are dropped.
+- A failed save explains itself in a toast. Before, the button only flashed
+  `ERROR` for two seconds and the panel said nothing.
+
 ## What is new in v1.3.7
 
 - A caption probe no longer gives up after a single read. The extension waits up

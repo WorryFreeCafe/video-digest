@@ -38,9 +38,20 @@ let digestButtonResizeListenerAdded = false;
 const DIGEST_RECONCILE_MIN_GAP_MS = 400;
 let digestButtonLastReconcileAt = 0;
 let biliDigestButton = null;
+let biliNoteButton = null;
 let biliNavTimer = null;
 let biliLastHref = "";
 let biliFullscreenListenerAdded = false;
+let biliButtonPositionRaf = null;
+let biliLastButtonLayout = "";
+let biliPositionListenersAdded = false;
+
+// The two B站 buttons float over the player's top-right corner. They are kept
+// out of B站's own containers on purpose: the watch page is Vue-hydrated, and
+// injecting into its toolbar makes the avatar / follow count / recommendation
+// covers fail to render. A fixed overlay that tracks the player rect gives the
+// same placement without touching the framework's DOM.
+const BILIBILI_BUTTON_GAP = 12;
 
 // 最近一次由播放器发出的、带 proof-of-origin token 的 timedtext URL。
 // 由 MAIN world 的 caption-pot-hook.js 通过 postMessage 送过来。没有 pot 的
@@ -81,17 +92,18 @@ const YTD_PAGE_SITE = (() => {
  * We wait a bit for YouTube's UI to fully render.
  */
 function init() {
-  // B站 has a different toolbar and no note button; keep it isolated so the
-  // YouTube selectors never run there (they would retry forever and log noise).
-  if (YTD_PAGE_SITE === "bilibili") {
-    initBilibili();
-    return;
-  }
-
-  // Register the global "n" keyboard shortcut once
+  // The "n" shortcut only needs a video page, so register it before the site
+  // split: B站 gets the same shortcut now that it has a Note button.
   if (!ytdNoteKeyboardListenerAdded) {
     document.addEventListener("keydown", handleNoteKeyboardShortcut);
     ytdNoteKeyboardListenerAdded = true;
+  }
+
+  // B站 keeps its own injection path: the toolbar is Vue-hydrated, so the
+  // YouTube selectors must never run there (they would retry forever).
+  if (YTD_PAGE_SITE === "bilibili") {
+    initBilibili();
+    return;
   }
 
   // Try to inject the buttons immediately
@@ -466,7 +478,7 @@ function initBilibili() {
   // 必须等 B站 自己完成 hydration 再动手。内容脚本在 document_idle 就开始跑，
   // 那时 B站 的 Vue 还在接管 SSR 出来的 DOM；此刻插入节点会被它当成自己的
   // 子节点去对比，进而把整块区域（UP 主头像 / 关注数 / 推荐封面）渲染坏。
-  const start = () => injectBilibiliDigestButton();
+  const start = () => injectBilibiliButtons();
   if (document.readyState === "complete") {
     setTimeout(start, 700);
   } else {
@@ -480,19 +492,34 @@ function initBilibili() {
 
     if (!hrefChanged) {
       // 没有站内跳转时只有两种情况要做事：按钮被页面清掉了（重建），或者
-      // 首次注入还没成功（继续尝试）。其余情况直接返回，省掉每秒一次的
+      // 首次注入还没成功（继续尝试）。其余情况只更新一次位置，省掉每秒一次的
       // querySelectorAll —— B站首页、搜索页也注入了这个脚本，那里无需任何工作。
-      if (biliDigestButton && biliDigestButton.isConnected) return;
+      if (biliDigestButton && biliDigestButton.isConnected) {
+        positionBilibiliButtons();
+        return;
+      }
       if (!biliDigestButton && !isBilibiliVideoPage()) return;
     }
 
-    injectBilibiliDigestButton();
+    injectBilibiliButtons();
   }, 1000);
+
+  if (!biliPositionListenersAdded) {
+    // 播放器位置随滚动和窗口尺寸变化，用 rAF 合并后在下一帧统一写入，
+    // 避免滚动时每来一个事件就触发一次 layout 读取。
+    window.addEventListener("scroll", scheduleBilibiliButtonPosition, {
+      passive: true,
+    });
+    window.addEventListener("resize", scheduleBilibiliButtonPosition);
+    biliPositionListenersAdded = true;
+  }
 
   if (!biliFullscreenListenerAdded) {
     document.addEventListener("fullscreenchange", () => {
-      if (!biliDigestButton) return;
-      biliDigestButton.style.display = document.fullscreenElement ? "none" : "";
+      const hidden = document.fullscreenElement ? "none" : "";
+      for (const button of [biliDigestButton, biliNoteButton]) {
+        if (button) button.style.display = hidden;
+      }
     });
     biliFullscreenListenerAdded = true;
   }
@@ -503,31 +530,24 @@ function isBilibiliVideoPage() {
 }
 
 /**
- * Builds the B站 Digest button.
- *
- * 它永远是挂在 <body> 上的独立浮层，不进入 B站 的任何容器：
- * B站 的播放页是 Vue 接管 SSR 结果的，往播放页工具栏这类受控容器里
- * 插一个外来子节点，会让它的 patch 逻辑对不上节点列表，
- * 表现为 UP 主头像、关注数、右侧推荐封面都不渲染（关掉扩展就恢复）。
+ * B站 的两个按钮共用一条浮层。它们挂在 <body> 上，不进入 B站 的任何容器：
+ * 播放页是 Vue 接管 SSR 结果的，往工具栏这类受控容器里插一个外来子节点，
+ * 会让它的 patch 逻辑对不上节点列表，表现为 UP 主头像、关注数、右侧推荐
+ * 封面都不渲染（关掉扩展就恢复）。所以位置改成由 JS 追踪播放器 rect，
+ * 视觉上贴着播放器右上角，DOM 上永远在 body 末尾。
  */
-function createBilibiliDigestButton() {
-  const button = document.createElement("button");
-  button.id = "ytd-digest-button";
-  button.type = "button";
-  button.setAttribute("aria-label", "Open Digest side panel");
-  button.textContent = "Digest";
-  button.style.cssText = `
-    position: fixed;
-    right: 24px;
-    bottom: 96px;
-    z-index: 2147483000;
+const BILIBILI_ACTIONS_ID = "ytd-bilibili-actions";
+
+function bilibiliButtonStyle() {
+  return `
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    height: 40px;
-    padding: 0 20px;
+    gap: 7px;
+    height: 38px;
+    padding: 0 18px;
     border: none;
-    border-radius: 20px;
+    border-radius: 19px;
     background: #c8674f;
     color: #fff;
     font-family: "PingFang SC", "Microsoft YaHei", "Roboto", sans-serif;
@@ -538,43 +558,170 @@ function createBilibiliDigestButton() {
     box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
     transition: background 0.2s, transform 0.1s;
   `;
+}
 
+function attachBilibiliButtonHover(button) {
   button.addEventListener("mouseenter", () => {
     button.style.background = "#b25742";
   });
   button.addEventListener("mouseleave", () => {
     button.style.background = "#c8674f";
   });
+}
+
+function createBilibiliActionsBar() {
+  const bar = document.createElement("div");
+  bar.id = BILIBILI_ACTIONS_ID;
+  bar.style.cssText = `
+    position: fixed;
+    top: 0;
+    right: 0;
+    z-index: 2147483000;
+    display: flex;
+    align-items: center;
+    gap: ${BILIBILI_BUTTON_GAP}px;
+    pointer-events: none;
+  `;
+  return bar;
+}
+
+/**
+ * Builds the B站 Digest button.
+ */
+function createBilibiliDigestButton() {
+  const button = document.createElement("button");
+  button.id = "ytd-digest-button";
+  button.type = "button";
+  button.setAttribute("aria-label", "Open Digest side panel");
+  button.textContent = "Digest";
+  button.style.cssText = `${bilibiliButtonStyle()} pointer-events: auto;`;
+  attachBilibiliButtonHover(button);
   button.addEventListener("click", (e) => {
     e.preventDefault();
     e.stopPropagation();
     void openDigestPanel("Bilibili Digest");
   });
-
   return button;
 }
 
-function injectBilibiliDigestButton() {
-  const existing = Array.from(document.querySelectorAll("#ytd-digest-button"));
+/**
+ * Builds the B站 Note button. It saves the subtitle line at the current
+ * playback position, same as the YouTube overlay.
+ */
+function createBilibiliNoteButton() {
+  const button = document.createElement("button");
+  button.id = "ytd-bili-note-button";
+  button.type = "button";
+  button.setAttribute("aria-label", "Save a note at the current position");
+  button.innerHTML = `
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+      <path d="M12 20h9"></path>
+      <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
+    </svg>
+    <span>Note</span>
+  `;
+  button.style.cssText = `${bilibiliButtonStyle()} background: #3d3a36; pointer-events: auto;`;
+  button.addEventListener("mouseenter", () => {
+    button.style.background = "#2c2a27";
+  });
+  button.addEventListener("mouseleave", () => {
+    button.style.background = "#3d3a36";
+  });
+  button.addEventListener("click", async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    await saveCurrentNote(button);
+  });
+  return button;
+}
 
+function findBilibiliPlayer() {
+  return (
+    document.querySelector("#bilibili-player") ||
+    document.querySelector(".bpx-player-container") ||
+    document.querySelector("#playerWrap")
+  );
+}
+
+/**
+ * Keeps the action bar pinned to the player's top-right corner. Runs on
+ * scroll / resize (rAF-merged) and once per second from the nav poll, so a
+ * player that resizes or swaps parts is followed without a MutationObserver.
+ */
+function positionBilibiliButtons() {
+  const bar = document.getElementById(BILIBILI_ACTIONS_ID);
+  if (!bar) return;
+
+  const player = findBilibiliPlayer();
+  if (!player) return;
+
+  const rect = player.getBoundingClientRect();
+  const inView =
+    rect.width > 240 &&
+    rect.bottom > 80 &&
+    rect.top < window.innerHeight - 80;
+
+  const top = Math.max(12, Math.round(rect.top) + 16);
+  const right = Math.max(12, Math.round(window.innerWidth - rect.right) + 16);
+  const layout = `${inView ? 1 : 0}:${top}:${right}`;
+  if (layout === biliLastButtonLayout) return;
+  biliLastButtonLayout = layout;
+
+  bar.style.top = `${top}px`;
+  bar.style.right = `${right}px`;
+  bar.style.display = inView ? "flex" : "none";
+}
+
+function scheduleBilibiliButtonPosition() {
+  if (biliButtonPositionRaf) return;
+  biliButtonPositionRaf = requestAnimationFrame(() => {
+    biliButtonPositionRaf = null;
+    positionBilibiliButtons();
+  });
+}
+
+function removeBilibiliButtons() {
+  document.getElementById(BILIBILI_ACTIONS_ID)?.remove();
+  document
+    .querySelectorAll("#ytd-digest-button, #ytd-bili-note-button")
+    .forEach((node) => node.remove());
+  biliDigestButton = null;
+  biliNoteButton = null;
+  biliLastButtonLayout = "";
+}
+
+function injectBilibiliButtons() {
   if (!isBilibiliVideoPage()) {
-    existing.forEach((node) => node.remove());
-    biliDigestButton = null;
+    removeBilibiliButtons();
     return false;
   }
 
-  if (biliDigestButton && biliDigestButton.isConnected) {
-    // 顺手清掉旧版本残留在页面里的按钮（旧版本会插进工具栏）。
-    existing.forEach((node) => {
-      if (node !== biliDigestButton) node.remove();
-    });
+  const bar = document.getElementById(BILIBILI_ACTIONS_ID);
+  if (
+    bar &&
+    biliDigestButton?.isConnected &&
+    biliNoteButton?.isConnected &&
+    bar.contains(biliDigestButton) &&
+    bar.contains(biliNoteButton)
+  ) {
+    // 顺手清掉旧版本残留在页面里的按钮（旧版本直接挂在 body 上）。
+    document
+      .querySelectorAll("#ytd-digest-button, #ytd-bili-note-button")
+      .forEach((node) => {
+        if (!bar.contains(node)) node.remove();
+      });
+    positionBilibiliButtons();
     return true;
   }
 
-  existing.forEach((node) => node.remove());
-  const button = createBilibiliDigestButton();
-  document.body.appendChild(button);
-  biliDigestButton = button;
+  removeBilibiliButtons();
+
+  const fresh = createBilibiliActionsBar();
+  biliDigestButton = createBilibiliDigestButton();
+  biliNoteButton = createBilibiliNoteButton();
+  fresh.append(biliDigestButton, biliNoteButton);
+  document.body.appendChild(fresh);
+  positionBilibiliButtons();
   return true;
 }
 
@@ -781,13 +928,18 @@ function resetNoteButtonTimer() {
   }, 2000);
 }
 
+function isNoteShortcutPage() {
+  if (YTD_PAGE_SITE === "bilibili") return isBilibiliVideoPage();
+  return window.location.pathname.includes("/watch");
+}
+
 /**
  * Handles the "n" keyboard shortcut for saving a note.
- * Only triggers on YouTube watch pages and when the user is not typing
+ * Only triggers on a video page and when the user is not typing
  * in an input field.
  */
 function handleNoteKeyboardShortcut(e) {
-  if (!window.location.pathname.includes("/watch")) return;
+  if (!isNoteShortcutPage()) return;
   if (e.key !== "n" && e.key !== "N") return;
 
   // Ignore if the user is typing in an input/textarea/contenteditable
@@ -801,9 +953,15 @@ function handleNoteKeyboardShortcut(e) {
     return;
   }
 
-  // Prevent YouTube's own "n" shortcut (e.g. next video in playlist)
+  // Prevent the site's own "n" shortcut (e.g. next video in a playlist)
   e.preventDefault();
   e.stopPropagation();
+
+  if (YTD_PAGE_SITE === "bilibili") {
+    // B站 has no hover-reveal button, so save straight from the shortcut.
+    saveCurrentNote(biliNoteButton);
+    return;
+  }
 
   // Show brief visual feedback on the button, then save
   showNoteButton();
@@ -814,10 +972,12 @@ function handleNoteKeyboardShortcut(e) {
 /**
  * Captures the current timestamp and saves it as a note.
  */
-async function saveCurrentNote() {
+async function saveCurrentNote(buttonEl) {
   debugLog("[YouTube Digest] Saving note");
 
-  const video = document.querySelector("video.html5-main-video");
+  const video = document.querySelector(
+    "video.html5-main-video, #bilibili-player video, .bpx-player-container video, video",
+  );
   if (!video) {
     console.error("[YouTube Digest] No video element found");
     return;
@@ -826,10 +986,15 @@ async function saveCurrentNote() {
   // Go back 3 seconds to capture what was just said (user reacts after hearing it)
   const currentTime = Math.max(0, Math.floor(video.currentTime) - 3);
   const videoInfo = extractVideoInfo();
-  const videoId = new URLSearchParams(window.location.search).get("v");
+  const videoId = YTD_SUBTITLE_SOURCES?.extractVideoId
+    ? YTD_SUBTITLE_SOURCES.extractVideoId(window.location.href)
+    : new URLSearchParams(window.location.search).get("v");
 
-  const noteButton = ytdNoteButton;
+  const noteButton = buttonEl || ytdNoteButton || biliNoteButton;
   const originalContent = noteButton ? noteButton.innerHTML : "";
+  const restingBackground = noteButton
+    ? noteButton.style.background || "#c8674f"
+    : "#c8674f";
 
   if (noteButton) {
     noteButton.innerHTML =
@@ -844,6 +1009,8 @@ async function saveCurrentNote() {
       timestamp: currentTime,
       videoTitle: videoInfo.title,
       channelName: videoInfo.channelName,
+      site: YTD_PAGE_SITE,
+      pageUrl: window.location.href,
     });
 
     if (result.success) {
@@ -858,6 +1025,10 @@ async function saveCurrentNote() {
         noteButton.innerHTML =
           '<span style="letter-spacing: 0.2px;">ERROR</span>';
       }
+      showNoteFailureToast(
+        result.message ||
+          "找不到这一时刻对应的字幕。请先在侧边栏生成一次 Digest 再试。",
+      );
       console.error("[YouTube Digest] Save note error:", result.error);
     }
   } catch (err) {
@@ -865,13 +1036,16 @@ async function saveCurrentNote() {
       noteButton.innerHTML =
         '<span style="letter-spacing: 0.2px;">ERROR</span>';
     }
+    showNoteFailureToast(
+      "扩展后台没有响应。请刷新这个页面后重试。",
+    );
     console.error("[YouTube Digest] Save note exception:", err);
   }
 
   setTimeout(() => {
     if (noteButton) {
       noteButton.innerHTML = originalContent;
-      noteButton.style.background = "#c8674f";
+      noteButton.style.background = restingBackground;
       noteButton.style.pointerEvents = "auto";
     }
   }, 2000);
@@ -880,22 +1054,25 @@ async function saveCurrentNote() {
 /**
  * Shows a toast notification when a note is saved.
  */
-function showNoteSavedToast(note) {
-  // Remove existing toast
-  const existing = document.getElementById("ytd-note-toast");
-  if (existing) existing.remove();
+function ensureNoteToastStyle() {
+  if (document.getElementById("ytd-note-toast-style")) return;
+  const style = document.createElement("style");
+  style.id = "ytd-note-toast-style";
+  style.textContent = `
+    @keyframes ytdSlideIn {
+      from { transform: translateX(100%); opacity: 0; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+function createNoteToast() {
+  document.getElementById("ytd-note-toast")?.remove();
+  ensureNoteToastStyle();
 
   const toast = document.createElement("div");
   toast.id = "ytd-note-toast";
-  toast.innerHTML = `
-    <div style="font-weight: 700; margin-bottom: 6px; color: #c8674f;">Note saved</div>
-    <div style="font-size: 12px; color: #6b6258; margin-bottom: 8px;">${escapeHtmlForContent(note.timestamp)} — ${escapeHtmlForContent(note.videoTitle)}</div>
-    <div style="font-size: 13px; line-height: 1.55; color: #2e2a24;">"${escapeHtmlForContent(note.text)}"</div>
-    <div style="margin-top: 10px; font-size: 11px;">
-      <a href="${escapeHtmlForContent(note.timestampedUrl)}" style="color: #c8674f; font-weight: 600; text-decoration: none;">Copy link</a>
-    </div>
-  `;
-
   toast.style.cssText = `
     position: fixed;
     bottom: 20px;
@@ -910,18 +1087,27 @@ function showNoteSavedToast(note) {
     font-family: system-ui, -apple-system, "Roboto", sans-serif;
     animation: ytdSlideIn 0.3s ease;
   `;
+  return toast;
+}
 
-  // Add animation keyframes
-  const style = document.createElement("style");
-  style.textContent = `
-    @keyframes ytdSlideIn {
-      from { transform: translateX(100%); opacity: 0; }
-      to { transform: translateX(0); opacity: 1; }
-    }
+function dismissNoteToastLater(toast, ms) {
+  setTimeout(() => {
+    toast.style.animation = "ytdSlideIn 0.3s ease reverse";
+    setTimeout(() => toast.remove(), 300);
+  }, ms);
+}
+
+function showNoteSavedToast(note) {
+  const toast = createNoteToast();
+  toast.innerHTML = `
+    <div style="font-weight: 700; margin-bottom: 6px; color: #c8674f;">Note saved</div>
+    <div style="font-size: 12px; color: #6b6258; margin-bottom: 8px;">${escapeHtmlForContent(note.timestamp)} — ${escapeHtmlForContent(note.videoTitle)}</div>
+    <div style="font-size: 13px; line-height: 1.55; color: #2e2a24;">"${escapeHtmlForContent(note.text)}"</div>
+    <div style="margin-top: 10px; font-size: 11px;">
+      <a href="${escapeHtmlForContent(note.timestampedUrl)}" style="color: #c8674f; font-weight: 600; text-decoration: none;">Copy link</a>
+    </div>
   `;
-  document.head.appendChild(style);
 
-  // Copy link handler
   toast.querySelector("a").addEventListener("click", async (e) => {
     e.preventDefault();
     try {
@@ -933,12 +1119,21 @@ function showNoteSavedToast(note) {
   });
 
   document.body.appendChild(toast);
+  dismissNoteToastLater(toast, 5000);
+}
 
-  // Auto-dismiss after 5 seconds
-  setTimeout(() => {
-    toast.style.animation = "ytdSlideIn 0.3s ease reverse";
-    setTimeout(() => toast.remove(), 300);
-  }, 5000);
+/**
+ * The button can only flash "ERROR" for two seconds, which leaves the user
+ * guessing. This explains why the note was not saved.
+ */
+function showNoteFailureToast(message) {
+  const toast = createNoteToast();
+  toast.innerHTML = `
+    <div style="font-weight: 700; margin-bottom: 6px; color: #b23b2c;">Note not saved</div>
+    <div style="font-size: 13px; line-height: 1.55; color: #2e2a24;">${escapeHtmlForContent(message || "Unknown error.")}</div>
+  `;
+  document.body.appendChild(toast);
+  dismissNoteToastLater(toast, 6000);
 }
 
 // ============================================================

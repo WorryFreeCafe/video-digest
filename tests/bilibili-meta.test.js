@@ -51,10 +51,10 @@ test("the Bilibili button never enters Bilibili's own DOM tree", () => {
   assert.doesNotMatch(content, /findBilibiliToolbar/);
 
   const inject = content.slice(
-    content.indexOf("function injectBilibiliDigestButton"),
+    content.indexOf("function injectBilibiliButtons"),
     content.indexOf("function scheduleDigestButtonReconciliation"),
   );
-  assert.match(inject, /document\.body\.appendChild\(button\)/);
+  assert.match(inject, /document\.body\.appendChild\(fresh\)/);
   assert.match(inject, /if \(!isBilibiliVideoPage\(\)\)/);
 });
 

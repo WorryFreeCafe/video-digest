@@ -459,6 +459,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.videoTitle,
       message.channelName,
       message.selectedText,
+      {
+        tabId: sender?.tab?.id,
+        site: message.site,
+        pageUrl: message.pageUrl,
+      },
     )
       .then(sendResponse)
       .catch((err) => sendResponse({ success: false, error: err.message }));
@@ -719,7 +724,7 @@ async function getPlayerVideoDetails(tabId) {
  * @param {number} [tabId] - 当前标签页 ID，用于向 content script 探测
  * @returns {Object}
  */
-async function handleFetchTranscriptSmart(videoId, tabId) {
+async function handleFetchTranscriptSmart(videoId, tabId, options = {}) {
   const settings = await getSettings();
   const diagnostics = {};
 
@@ -740,8 +745,10 @@ async function handleFetchTranscriptSmart(videoId, tabId) {
   const platformFailure = diagnostics.platformFailure || "NO_CAPTION_TRACKS";
   const platformDetail = diagnostics.platformDetail || "";
 
-  // 2) 本地 Whisper 音频转录兜底（若用户已启用）
-  if (settings.whisperEnabled && tabId) {
+  // 2) 本地 Whisper 音频转录兜底（若用户已启用）。
+  // platformOnly 用于"保存笔记"这类只需要定位一句字幕的场景：不能为了这一句
+  // 去录几十秒音频，那会让按钮卡住半分钟。
+  if (settings.whisperEnabled && tabId && !options.platformOnly) {
     const whisper = await handleCaptureAudioTranscribe(tabId, settings, {
       silent: true,
     });
@@ -1673,6 +1680,35 @@ async function handleGetVideoInfo(tabId) {
 // ============================================================
 
 /**
+ * Timestamped link for a saved note.
+ *
+ * YouTube notes point at the canonical watch URL. B站 notes keep the current
+ * page URL instead, so a multi-part video stays on the part the note was taken
+ * from; B站 reads `t` as a start offset in seconds.
+ */
+function buildNoteTimestampedUrl({ site, pageUrl, videoId, seconds }) {
+  if (site === "bilibili") {
+    const fallback = /^(BV[0-9A-Za-z]+|av\d+)$/.test(String(videoId || ""))
+      ? `https://www.bilibili.com/video/${videoId}/`
+      : "";
+    try {
+      const url = new URL(pageUrl || fallback);
+      if (url.hostname === "bilibili.com" || url.hostname.endsWith(".bilibili.com")) {
+        const clean = new URL(`${url.origin}${url.pathname}`);
+        // 只保留分 P 号，其余追踪参数（spm_id_from / vd_source 等）不进笔记。
+        const part = url.searchParams.get("p");
+        if (part) clean.searchParams.set("p", part);
+        clean.searchParams.set("t", String(seconds));
+        return clean.toString();
+      }
+    } catch (_e) {
+      /* fall through to the YouTube shape */
+    }
+  }
+  return `${YTD_SETTINGS.canonicalYouTubeUrl(videoId)}&t=${seconds}s`;
+}
+
+/**
  * Saves a note at a timestamp. Exact selected text is stored directly.
  * Other note requests find the relevant transcript line and clean it up.
  */
@@ -1682,9 +1718,9 @@ async function handleSaveNote(
   videoTitle,
   channelName,
   selectedText,
+  meta = {},
 ) {
   try {
-    const canonicalVideoUrl = YTD_SETTINGS.canonicalYouTubeUrl(videoId);
     const safeTimestamp = Math.max(0, Math.floor(Number(timestamp) || 0));
     const exactSelectedText =
       typeof selectedText === "string"
@@ -1707,7 +1743,12 @@ async function handleSaveNote(
           typeof channelName === "string" ? channelName.slice(0, 300) : "",
         timestamp: `${minutes}:${String(seconds).padStart(2, "0")}`,
         timestampSeconds: safeTimestamp,
-        timestampedUrl: `${canonicalVideoUrl}&t=${safeTimestamp}s`,
+        timestampedUrl: buildNoteTimestampedUrl({
+          site: meta.site,
+          pageUrl: meta.pageUrl,
+          videoId,
+          seconds: safeTimestamp,
+        }),
         text: exactSelectedText,
         rawText: exactSelectedText,
         createdAt: Date.now(),
@@ -1733,15 +1774,30 @@ async function handleSaveNote(
       debugLog("[YouTube Digest] No cached transcript");
     }
 
-    // Notes are created from the side panel, which only opens after a digest
-    // has been loaded and cached. If the cache is gone, asking the user to
-    // reload is cheaper and more honest than re-running subtitle discovery
-    // from a background context that has no tab to probe.
+    // The cache only exists for videos that already ran a digest, and entries
+    // are evicted (20 kept / 30 days). A note taken from the page overlay has
+    // no such guarantee, but the message came from a content script, so the
+    // tab is still available and the platform captions can be read on demand.
+    if (!transcript && meta.tabId) {
+      const fetched = await handleFetchTranscriptSmart(videoId, meta.tabId, {
+        platformOnly: true,
+      });
+      if (
+        fetched?.success &&
+        Array.isArray(fetched.transcript) &&
+        fetched.transcript.length
+      ) {
+        transcript = fetched.transcript;
+        debugLog("[YouTube Digest] Fetched platform transcript for note");
+      }
+    }
+
     if (!transcript) {
       return {
         success: false,
         error: "NO_CACHED_TRANSCRIPT",
-        message: "字幕缓存已失效，请在侧边栏重新加载这个视频后再保存笔记。",
+        message:
+          "这个视频还没生成过 Digest，也没读到平台字幕，定位不到当前这一句。请先在侧边栏生成一次 Digest，或重新打开视频后再试。",
       };
     }
 
@@ -1826,7 +1882,12 @@ async function handleSaveNote(
     const formattedTimestamp = `${minutes}:${String(seconds).padStart(2, "0")}`;
 
     // Create timestamped URL
-    const timestampedUrl = `${canonicalVideoUrl}&t=${safeTimestamp}s`;
+    const timestampedUrl = buildNoteTimestampedUrl({
+      site: meta.site,
+      pageUrl: meta.pageUrl,
+      videoId,
+      seconds: safeTimestamp,
+    });
 
     // Create the note object
     const note = {
