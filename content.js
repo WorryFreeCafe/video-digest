@@ -1747,9 +1747,18 @@ async function fetchYoutubeTranscriptPanel() {
   const existing = readSegments();
   if (existing.length) return toResult(existing);
 
+  // 面板已打开但还在加载：直接等它渲染，别再点一次入口（会把面板关掉）。
+  const panelAlreadyOpen = () => {
+    const panel = document.querySelector(
+      'ytd-engagement-panel-section-list-renderer[target-id*="transcript"]',
+    );
+    return !!panel && panel.getAttribute("visibility") === "ENGAGEMENT_PANEL_VISIBILITY_EXPANDED";
+  };
+  const wasOpen = panelAlreadyOpen();
+
   // 描述区默认折叠，先展开，否则入口按钮点不到。
   const expand = document.querySelector("tp-yt-paper-button#expand, #expand");
-  if (expand && expand.offsetParent !== null) {
+  if (!wasOpen && expand && expand.offsetParent !== null) {
     try {
       expand.click();
       await new Promise((resolve) => setTimeout(resolve, 400));
@@ -1758,12 +1767,14 @@ async function fetchYoutubeTranscriptPanel() {
     }
   }
 
-  const toggle = findTranscriptToggle();
-  if (!toggle) return { success: false, reason: "NO_TRANSCRIPT_BUTTON" };
-  try {
-    toggle.click();
-  } catch (_e) {
-    return { success: false, reason: "NO_TRANSCRIPT_BUTTON" };
+  if (!wasOpen) {
+    const toggle = findTranscriptToggle();
+    if (!toggle) return { success: false, reason: "NO_TRANSCRIPT_BUTTON" };
+    try {
+      toggle.click();
+    } catch (_e) {
+      return { success: false, reason: "NO_TRANSCRIPT_BUTTON" };
+    }
   }
 
   const segments = await new Promise((resolve) => {
@@ -1777,10 +1788,12 @@ async function fetchYoutubeTranscriptPanel() {
     tick();
   });
 
-  // 抓完把面板收起来，别把用户的页面留在展开状态。
-  const panel = document.querySelector(
-    'ytd-engagement-panel-section-list-renderer[target-id*="transcript"]',
-  );
+  // 抓完把面板收起来，别把用户的页面留在展开状态；本来就开着的不要动。
+  const panel = wasOpen
+    ? null
+    : document.querySelector(
+        'ytd-engagement-panel-section-list-renderer[target-id*="transcript"]',
+      );
   if (panel) {
     const close = panel.querySelector(
       '#visibility-button button, button[aria-label*="Close"], button[aria-label*="关闭"]',

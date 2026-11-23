@@ -101,6 +101,19 @@ test("a missing caption track still tries get_transcript and the page panel", ()
   assert.match(probe, /await requestYoutubeTranscriptPanel\(tabId, diagnostics\)/);
 });
 
+test("an already-open transcript panel is not toggled shut", () => {
+  const content = read("content.js");
+  const fn = content.slice(
+    content.indexOf("async function fetchYoutubeTranscriptPanel"),
+    content.indexOf("function pickCaptionLang"),
+  );
+
+  // 用户自己开着的面板只能等它渲染完，再点一次入口反而会关掉它。
+  assert.match(fn, /const wasOpen = panelAlreadyOpen\(\)/);
+  assert.match(fn, /if \(!wasOpen\) \{[\s\S]{0,400}?toggle\.click\(\)/);
+  assert.match(fn, /ENGAGEMENT_PANEL_VISIBILITY_EXPANDED/);
+});
+
 test("the transcript panel fallback reads rendered segments", () => {
   const content = read("content.js");
 
