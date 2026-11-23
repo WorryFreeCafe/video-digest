@@ -136,8 +136,6 @@ function loadBackgroundHelpers({
     },
   };
   sandbox.globalThis = sandbox;
-  // Load the real probe module: background.js reaches for it at runtime.
-  vm.runInNewContext(read("whisper-client.js"), sandbox);
   vm.runInNewContext(read("background.js"), sandbox);
   return sandbox.__YTD_TRANSLATION_TESTING__;
 }

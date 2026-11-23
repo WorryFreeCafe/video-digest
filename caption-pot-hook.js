@@ -3,7 +3,7 @@
  * ============================================================
  * YouTube 从 2025 年起对 `/api/timedtext` 增加了 proof-of-origin token
  * （URL 里的 `pot` / `potc` 参数）。没有 pot 时接口返回 **HTTP 200 但响应体为空**，
- * 这正是扩展"拿到 captionTracks 却解析出 0 条字幕"、最后掉进 30 秒 Whisper 兜底的原因。
+ * 这正是扩展"拿到 captionTracks 却解析出 0 条字幕"的原因。
  *
  * pot 由播放器内部的 BotGuard 生成，扩展无法自行计算。但播放器自己会带着 pot 去
  * 请求一次完整字幕文件（开启 CC 时）。这个脚本就住在页面的 MAIN world，负责：

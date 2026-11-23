@@ -56,21 +56,19 @@ test("platform failures are reported back to the panel", () => {
 
   for (const reason of [
     "NO_CAPTION_TRACKS",
+    "PLATFORM_PROBE_FAILED",
     "EMPTY_CAPTION_BODY",
     "CONTENT_SCRIPT_MISSING",
     "POT_UNAVAILABLE",
   ]) {
     assert.match(background, new RegExp(`"${reason}"`), `${reason} should be produced`);
   }
-  // 两条失败分支都要带出去，否则面板只能显示 Whisper 的错误。
-  assert.equal(
-    (background.match(/platformFailure,/g) || []).length >= 2,
-    true,
-    "both whisper-failed and no-whisper branches must forward platformFailure",
-  );
+  // 失败原因必须随结果一起回到面板，否则用户只能看到一句笼统的失败。
+  assert.match(background, /platformFailure,\s*platformDetail,/);
+  assert.match(background, /retryable/);
 });
 
-test("the panel explains the platform cause instead of only Whisper", () => {
+test("the panel explains the platform cause and offers a reload", () => {
   const sidepanel = read("sidepanel.js");
 
   assert.match(sidepanel, /const PLATFORM_FAILURE_HINTS = \{/);
@@ -78,10 +76,40 @@ test("the panel explains the platform cause instead of only Whisper", () => {
   // 页面侧原因可直接刷新恢复，pot 钩子只在 document_start 注入。
   assert.match(sidepanel, /async function reloadTabAndRetryTranscript\(\)/);
   assert.match(sidepanel, /await chrome\.tabs\.reload\(youtubeTabId\)/);
-  // 标题必须来自平台原因，"Local Whisper is not running" 只是兜底。
-  const fn = sidepanel.slice(sidepanel.indexOf("function showWhisperFallbackError"));
-  assert.match(fn, /document\.getElementById\("errorTitle"\)\.textContent = platform/);
-  assert.match(fn, /没有在运行，所以没有备用字幕来源/);
+  // 标题与正文都来自平台原因表，不再引导安装本地 Whisper。
+  const fn = sidepanel.slice(sidepanel.indexOf("function showSubtitleFallbackError"));
+  assert.match(fn, /document\.getElementById\("errorTitle"\)\.textContent =/);
+  assert.match(fn, /platform\?\.title/);
+  assert.match(fn, /platform\?\.hint/);
+  assert.doesNotMatch(sidepanel, /openWhisperGuide|showWhisperFallbackError/);
+});
+
+test("a missing caption track still tries get_transcript and the page panel", () => {
+  const background = read("background.js");
+  const probe = background.slice(
+    background.indexOf("async function probePlatformSubtitle"),
+    background.indexOf("async function requestYoutubeCaptionFromPage"),
+  );
+
+  // 没有 tracks 时不能直接放弃，否则有字幕的视频也会被判定为"没有字幕"。
+  assert.doesNotMatch(
+    probe,
+    /if \(!tracks\.length\) \{[\s\S]{0,200}?return null;/,
+    "an empty track list must not bail out",
+  );
+  assert.match(probe, /await requestYoutubeTranscriptInner\(tabId, videoId, diagnostics\)/);
+  assert.match(probe, /await requestYoutubeTranscriptPanel\(tabId, diagnostics\)/);
+});
+
+test("the transcript panel fallback reads rendered segments", () => {
+  const content = read("content.js");
+
+  assert.match(content, /async function fetchYoutubeTranscriptPanel\(\)/);
+  assert.match(content, /ytd-transcript-segment-renderer/);
+  assert.match(content, /querySelector\("\.segment-text"\)/);
+  assert.match(content, /function findTranscriptToggle\(\)/);
+  // 面板是 YouTube 自己渲染的：它天然带 pot 与登录态，是 pot 失败后的最后兜底。
+  assert.match(content, /ytd-video-description-transcript-section-renderer/);
 });
 
 test("an already-on caption button is toggled so the player refetches", () => {

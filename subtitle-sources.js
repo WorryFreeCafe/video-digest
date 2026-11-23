@@ -4,7 +4,7 @@
  * 负责"先本地探测、再按来源取字幕"的统一编排。来源优先级：
  *   1. platform  — 平台原生字幕（YouTube captionTracks / B站字幕接口 /
  *                 通用 HTML5 <track> 与 video.textTracks），免费
- *   2. whisper   — 无原生字幕时，捕获视频音频走本地 faster-whisper 服务转录
+ *   2. none      — 平台没有可用字幕时如实返回，不做音频转录
  *
  * 该文件同时被 background.js（importScripts）和 content.js（content_scripts
  * 注入）加载，因此内部用全局命名空间挂载，不含任何 DOM 直接依赖；DOM 相关
@@ -100,8 +100,8 @@ var YTD_SUBTITLE_SOURCES = (() => {
   }
 
   /**
-   * 把一份已就绪的字幕文本（无时间轴，例如 Whisper 输出）转成 transcript。
-   * @param {string} text Whisper/纯文本字幕
+   * 把一份已就绪的纯文本字幕转成单条 transcript。
+   * @param {string} text 纯文本字幕
    * @returns {{transcript:Array, transcriptText:string, transcriptTextTimestamped:string, language:string|null}}
    */
   function buildTranscriptFromPlainText(text = "") {
@@ -125,7 +125,7 @@ var YTD_SUBTITLE_SOURCES = (() => {
 
   /**
    * 统一构造"来源"返回对象，供 background 直接 sendResponse。
-   * @param {"platform"|"whisper"|"none"} source
+   * @param {"platform"|"none"} source
    * @param {Object} payload
    */
   function sourceResult(source, payload = {}) {

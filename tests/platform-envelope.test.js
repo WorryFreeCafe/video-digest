@@ -59,14 +59,16 @@ test("source envelope marks platform subtitles as successful", () => {
   assert.equal(res.transcript.length, 1);
 });
 
-test("whisper capture results carry a success envelope", () => {
+test("the smart router reports why platform captions were unavailable", () => {
   const background = read("background.js");
-  const start = background.indexOf("const text = await captureViaOffscreen");
-  const slice = background.slice(start, start + 900);
+  const router = background.slice(
+    background.indexOf("async function handleFetchTranscriptSmart"),
+    background.indexOf("function asPlatformResult"),
+  );
 
-  // buildTranscriptFromPlainText returns the transcript body only. Returning
-  // it raw made applyTranscriptResult() and handleFetchTranscriptSmart() treat
-  // a successful Whisper run as a failure ("No transcript found").
-  assert.match(slice, /sourceResult\("whisper"/);
-  assert.doesNotMatch(slice, /built\.note = /);
+  // 不再有音频转录兜底：失败时把平台原因与可重试标记一起交回面板。
+  assert.doesNotMatch(router, /captureAudio|whisper/i);
+  assert.match(router, /diagnostics\.platformFailure/);
+  assert.match(router, /retryable/);
+  assert.match(router, /sourceResult\("none"/);
 });

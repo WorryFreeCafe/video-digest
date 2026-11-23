@@ -14,14 +14,20 @@ test("manifest uses minimized install-time permissions", () => {
   assert.equal(manifest.minimum_chrome_version, "116");
   assert.equal(packageJson.version, manifest.version);
   assert.equal(manifest.options_ui.page, "options.html");
-  // activeTab is required: Chrome refuses tabCapture until the extension has
-  // been invoked on the tab, and that grant only exists when activeTab is
-  // declared. Dropping it makes every capture fail with "has not been invoked".
-  assert.ok(manifest.permissions.includes("activeTab"));
-  assert.ok(manifest.permissions.includes("tabCapture"));
+  // 录音兜底已经移除：tabCapture / offscreen / activeTab 都不再需要，权限收到
+  // 只够读页面与调用 DeepSeek。
+  assert.equal(manifest.permissions.includes("tabCapture"), false);
+  assert.equal(manifest.permissions.includes("offscreen"), false);
+  assert.equal(manifest.permissions.includes("activeTab"), false);
+  assert.equal(Object.hasOwn(manifest, "commands"), false);
   assert.ok(manifest.host_permissions.includes("https://api.deepseek.com/*"));
+  assert.equal(
+    manifest.host_permissions.some((host) => /127\.0\.0\.1|localhost/.test(host)),
+    false,
+    "本地 Whisper 服务地址不应再申请权限",
+  );
   assert.equal(Object.hasOwn(manifest, "optional_host_permissions"), false);
-  assert.equal(manifest.version, "1.3.9");
+  assert.equal(manifest.version, "1.4.0");
 });
 
 test("release copy documents current scope without em dashes", () => {

@@ -226,6 +226,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // async response
   }
 
+  if (message.action === "fetchYoutubeTranscriptInner") {
+    // 网页版"显示转录文字"用的 inner API（不需要 pot）。
+    fetchYoutubeTranscriptInner(message.videoId)
+      .then((result) => sendResponse(result))
+      .catch((err) => sendResponse({ success: false, reason: String(err) }));
+    return true;
+  }
+
+  if (message.action === "fetchYoutubeTranscriptPanel") {
+    // 最后一道原生兜底：直接读页面自己的转录面板 DOM。
+    fetchYoutubeTranscriptPanel()
+      .then((result) => sendResponse(result))
+      .catch((err) => sendResponse({ success: false, reason: String(err) }));
+    return true;
+  }
+
   if (message.action === "probePlatformSubtitle") {
     // 站点专属字幕探测：优先从页面拿到平台原生字幕所需的关键信息。
     // YouTube 的 captionTracks 需在 MAIN world 读取（由 background 用
@@ -1457,7 +1473,7 @@ function pullCaptionPotUrl() {
  *
  * 返回 { kicked, restore }：`restore` 表示字幕开关是被我们打开的，抓完要还原；
  * 原本就开着的情况不能直接 return，否则播放器不会重新请求，钩子又错过首次请求
- * 时整条 pot 通道永远拿不到 URL（表现为"没有字幕、请开 Whisper"）。
+ * 时整条 pot 通道永远拿不到 URL（表现为"没有字幕"）。
  */
 function kickCaptionRequest() {
   const button = document.querySelector(".ytp-subtitles-button");
@@ -1649,6 +1665,136 @@ async function fetchYoutubeTranscriptInner(videoId) {
   } catch (e) {
     return { success: false, reason: "TRANSCRIPT_API_FAILED" };
   }
+}
+
+/**
+ * 把 "1:23" / "1:02:03" 这样的时间戳转成秒。
+ * @param {string} value
+ * @returns {number}
+ */
+function panelTimestampToSeconds(value) {
+  const parts = String(value || "")
+    .trim()
+    .split(":")
+    .map((part) => Number(part.replace(/[^\d]/g, "")))
+    .filter((part) => Number.isFinite(part));
+  if (!parts.length) return 0;
+  return parts.reduce((total, part) => total * 60 + part, 0);
+}
+
+/** 找到描述区里"显示转录文字 / Show transcript"的入口按钮。 */
+function findTranscriptToggle() {
+  const scopes = [
+    "ytd-video-description-transcript-section-renderer",
+    "ytd-structured-description-content-renderer",
+    "ytd-watch-metadata",
+    "#description",
+  ];
+  const keyword = /(transcript|transcription|字幕|转录|文字稿)/i;
+  for (const scope of scopes) {
+    const root = document.querySelector(scope);
+    if (!root) continue;
+    const buttons = Array.from(root.querySelectorAll("button, a, tp-yt-paper-button"));
+    const hit = buttons.find((el) => {
+      const label = `${el.textContent || ""} ${el.getAttribute("aria-label") || ""} ${el.getAttribute("title") || ""}`;
+      return keyword.test(label);
+    });
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/**
+ * 最后一道原生兜底：直接读 YouTube 页面自己的转录面板。
+ *
+ * 前两条通道（timedtext + pot、get_transcript）都失败时，页面 UI 里那份转录
+ * 通常仍然可用——它由 YouTube 自己渲染，pot 与登录态都由播放器处理。这里只
+ * 做三件事：展开描述区、点开转录面板、把 segment 读成 json3 结构。
+ *
+ * @returns {Promise<{success:boolean, text?:string, reason?:string}>}
+ */
+async function fetchYoutubeTranscriptPanel() {
+  const readSegments = () => {
+    const nodes = Array.from(
+      document.querySelectorAll("ytd-transcript-segment-renderer"),
+    );
+    if (!nodes.length) return [];
+    return nodes
+      .map((node) => {
+        const timeText =
+          node.querySelector(".segment-timestamp")?.textContent?.trim() || "";
+        const text =
+          node
+            .querySelector(".segment-text")
+            ?.textContent?.replace(/\s+/g, " ")
+            .trim() || "";
+        if (!text) return null;
+        return { start: panelTimestampToSeconds(timeText), text };
+      })
+      .filter(Boolean);
+  };
+
+  const toResult = (segments) => {
+    if (!segments.length) return { success: false, reason: "PANEL_EMPTY" };
+    const events = segments.map((segment) => ({
+      tStartMs: segment.start * 1000,
+      segs: [{ utf8: segment.text }],
+    }));
+    return { success: true, text: JSON.stringify({ events }), lang: "" };
+  };
+
+  // 用户可能已经自己打开了面板。
+  const existing = readSegments();
+  if (existing.length) return toResult(existing);
+
+  // 描述区默认折叠，先展开，否则入口按钮点不到。
+  const expand = document.querySelector("tp-yt-paper-button#expand, #expand");
+  if (expand && expand.offsetParent !== null) {
+    try {
+      expand.click();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    } catch (_e) {
+      /* noop */
+    }
+  }
+
+  const toggle = findTranscriptToggle();
+  if (!toggle) return { success: false, reason: "NO_TRANSCRIPT_BUTTON" };
+  try {
+    toggle.click();
+  } catch (_e) {
+    return { success: false, reason: "NO_TRANSCRIPT_BUTTON" };
+  }
+
+  const segments = await new Promise((resolve) => {
+    const deadline = Date.now() + 8000;
+    const tick = () => {
+      const found = readSegments();
+      if (found.length) return resolve(found);
+      if (Date.now() >= deadline) return resolve([]);
+      setTimeout(tick, 300);
+    };
+    tick();
+  });
+
+  // 抓完把面板收起来，别把用户的页面留在展开状态。
+  const panel = document.querySelector(
+    'ytd-engagement-panel-section-list-renderer[target-id*="transcript"]',
+  );
+  if (panel) {
+    const close = panel.querySelector(
+      '#visibility-button button, button[aria-label*="Close"], button[aria-label*="关闭"]',
+    );
+    if (close) {
+      try {
+        close.click();
+      } catch (_e) {
+        /* noop */
+      }
+    }
+  }
+
+  return toResult(segments);
 }
 
 /**

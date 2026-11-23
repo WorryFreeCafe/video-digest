@@ -15,6 +15,23 @@ YouTube Digest is a bring-your-own-key project installed locally from GitHub. It
 
 ![YouTube Digest demo](YouTube%20Digest%20demo.png)
 
+## What is new in v1.4.0
+
+- Removed the local Whisper fallback, along with `tabCapture`, the offscreen
+  recorder, and the in-extension setup guide. Recording only ever covered 30
+  seconds from the playhead, so it produced a transcript that looked truncated
+  and had to be kept running by hand.
+- The transcript now comes from three independent platform routes: the player's
+  own signed `timedtext` URL, YouTube's `get_transcript` endpoint, and finally a
+  read of the page's own transcript panel. The last two do not need a
+  proof-of-origin token.
+- A missing caption track no longer aborts the probe. Previously an empty
+  `captionTracks` list returned "no subtitles" immediately, so a video with
+  captions could be reported as having none.
+- The panel separates "this video has no captions" from "this attempt failed,
+  reload to retry", and drops the Whisper-related copy.
+- Permissions are down to `sidePanel`, `storage`, `tabs`, and `scripting`.
+
 ## What is new in v1.3.9
 
 - The Bilibili overlay no longer sits on the picture. It fades in only while the
@@ -278,56 +295,27 @@ transcript service in the loop, so a failed probe costs nothing:
    panel), which needs no token. Bilibili's API needs a signed-in session; when logged
    out it returns nothing.
 
-2. **No native subtitle, local Whisper transcription (optional).** If no
-   platform caption exists and you enable **Local Whisper** in Settings, the
-   extension captures the tab's current audio (via `chrome.tabCapture`, which
-   works for cross-origin players) and sends it to a local
-   [faster-whisper](https://github.com/SYSTRAN/faster-whisper) service
-   (`whisper/whisper_server.py`). Transcription happens on your machine and never
-   leaves it.
-
-If neither path produces text, the panel says so and points at the Whisper
-setting. It does not silently upload your video URL anywhere.
-
-### Run the local Whisper server (optional)
-
-```bash
-pip install -r whisper/requirements.txt
-python whisper/whisper_server.py --model small --port 8000
-```
-
-Then in Settings, enable **Local Whisper** and keep the default server URL
-`http://127.0.0.1:8000`. Press **Check connection**: it should report the model
-and a response time. The full walkthrough, including the model table and a
-troubleshooting list, ships with the extension as `whisper-guide.html` (linked
-from Settings, and opened by the panel when the server is down). Note the same limitation as always: DRM / encrypted
-streams and videos that have not started playing cannot be captured, so this
-fallback only helps for playable, unencrypted videos.
+2. **No captions? Say so.** There is no audio recording and no local service to
+   run. If a video has no caption track and no transcript panel, the panel states
+   that plainly and offers a reload when the cause is a stale page. Nothing is
+   uploaded anywhere.
 
 Two practical notes:
 
 - Bilibili's subtitle API only returns tracks for a signed-in session. If you are
-  logged out, the probe finds nothing and the flow falls through to Whisper.
-- Chrome only allows tab audio capture after the extension has been invoked on
-  that tab, and only the toolbar icon or the shortcut counts as an invocation.
-  The in-page Digest button opens the panel but does not grant activeTab. When
-  the grant is missing Chrome answers `Extension has not been invoked for the
-  current page`; the panel asks for one icon click and then resumes the capture
-  on its own.
-- The shortcut **Alt+Shift+9** does the same thing as clicking the icon (it also
-  grants activeTab for the current tab), which helps when the icon is folded into
-  the Extensions menu. Reloading the page drops the grant, so press it again.
-- The grant comes from declaring `activeTab` in the manifest plus one real
-  invocation. Without that permission every click fails with the same error, so
-  keep it in `permissions`.
+  logged out, the probe finds nothing and the panel tells you the video has no
+  readable captions.
+- YouTube's transcript panel is a UI fallback, so it depends on the page layout.
+  If a future redesign removes it, the first two routes still work.
 
 ## Roadmap: cloud transcription with Groq (not implemented)
 
-The extension no longer calls a transcript API, so the only way to handle a video
-with no captions is local Whisper, which currently records 5 to 120 seconds of
-the playing tab. That is enough to sample a video, not to digest it. The planned
-fix is an opt-in cloud path using [Groq](https://groq.com/) rather than a
-transcript vendor, because Groq transcribes audio instead of proxying captions.
+A video with no captions at all cannot be digested right now: the extension only
+reads captions the page already has, and recording the tab was removed in v1.4.0
+(it only ever captured 30 seconds, which is enough to sample a video, not to
+digest it). The planned fix is an opt-in cloud path using
+[Groq](https://groq.com/) rather than a transcript vendor, because Groq
+transcribes audio instead of proxying captions.
 
 Why Groq:
 
@@ -409,7 +397,7 @@ If you want another AI provider or model, first open the exact YouTube Digest pr
 
 YouTube Digest makes provider requests directly from the extension:
 
-1. It reads captions from the page you already have open, or records that tab's audio and sends it to the local Whisper server you configured. Subtitle retrieval never leaves your machine.
+1. It reads captions from the page you already have open. Subtitle retrieval never leaves your machine and never uses a paid service.
 2. It sends the transcript and relevant video metadata to DeepSeek when you request AI features.
 3. Focused features send only the content they need, such as selected text with context or small transcript batches for translation.
 4. It stores keys, settings, notes, and recent cache entries locally in Chrome.
@@ -442,13 +430,14 @@ There is no YouTube Digest account system, advertising, analytics, or telemetry.
 
 ### No transcript is found
 
-- Confirm the video is public and has native captions.
-- If you did not enable **Local Whisper** in Settings, the extension does not
-  transcribe audio on its own. Enable it (and start `whisper/whisper_server.py`)
-  to get an audio-transcription fallback.
-Caption retrieval never uses a paid service, so retries cost nothing. If the
-platform track is missing and Whisper is off, enable it and start
-`whisper/whisper_server.py`; there is no cloud fallback to fall back to.
+- The panel distinguishes two cases. "This video has no captions" means the
+  creator uploaded none and YouTube generated none, so there is nothing to read.
+- "Couldn't read this video's captions" means captions exist but the page did not
+  hand them over, which is usual after an extension update. Press
+  **Reload page & retry**.
+- Caption retrieval never uses a paid service, so retries cost nothing.
+- There is no audio recording and no cloud transcription: a video without
+  captions cannot be digested.
 
 ### AI requests fail
 

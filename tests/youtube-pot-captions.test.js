@@ -60,10 +60,12 @@ test("an empty HTTP 200 is treated as failure, not as captions", () => {
     background.indexOf("async function readBilibiliSubtitleMeta"),
   );
 
-  // 只看 resp.ok 会把空的 200 当成功，最终让面板掉进 30 秒 Whisper 兜底，
-  // 这正是"只拿到一句话"的根因。
+  // 只看 resp.ok 会把空的 200 当成"已拿到字幕"。
   assert.match(body, /if \(body && body\.length > 200\)/);
-  assert.match(body, /requestYoutubeCaptionFromPage\(tabId, trackLangs, diagnostics\)/);
+  assert.match(
+    body,
+    /requestYoutubeCaptionFromPage\(\s*tabId,\s*trackLangs,\s*diagnostics,?\s*\)/,
+  );
 });
 
 test("json3 captions are parsed with their timeline", () => {

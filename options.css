@@ -146,13 +146,6 @@ input[type="checkbox"] {
   cursor: pointer;
 }
 
-label[for="whisperEnabled"] {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  cursor: pointer;
-}
-
 input:focus,
 textarea:focus {
   border-color: var(--accent);
@@ -358,47 +351,7 @@ button.danger {
   color: var(--danger);
 }
 
-/* Local Whisper: probe button, setup guide link, and inline result. */
-.whisper-actions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 14px;
-  margin-top: 12px;
-}
-
-.whisper-actions button {
-  padding: 8px 14px;
-  font-size: 13px;
-}
-
-.whisper-guide-link {
-  color: var(--accent);
-  font-size: 13px;
-  font-weight: 700;
-  text-decoration: none;
-}
-
-.whisper-guide-link:hover {
-  text-decoration: underline;
-}
-
-.whisper-status {
-  margin-top: 10px;
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1.55;
-  min-height: 1.55em;
-}
-
-.whisper-status.is-ok {
-  color: #4a7350;
-}
-
-.whisper-status.is-bad {
-  color: var(--danger);
-}
-
+/* Inline save / data / copy status. */
 #saveStatus,
 #dataStatus,
 #copyStatus {

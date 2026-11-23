@@ -17,6 +17,14 @@ YouTube Digest 是一个需要自行提供 API Key 的开源项目，通过 GitH
 
 ![YouTube Digest 双语演示](YouTube%20Digest%20demo%20bilingual.png)
 
+## v1.4.0 更新
+
+- 移除本地 Whisper 兜底，同时去掉 `tabCapture`、offscreen 录音进程和内置安装指南。录音本来就只覆盖播放位置之后 30 秒，转出来的字幕看起来就是"只有开头一段"，还得手动把服务挂着。
+- 字幕改为三条互相独立的原生通道：播放器自己带签名的 `timedtext` URL、YouTube 的 `get_transcript` 接口，最后是直接读页面自己的转录面板。后两条都不需要 pot。
+- 没有字幕轨时不再直接放弃。以前 `captionTracks` 为空就立刻判定"没有字幕"，有字幕的视频也可能被误判。
+- 面板把"这个视频没有字幕"和"这次没读到，刷新可恢复"分开说明，并去掉了所有 Whisper 相关文案。
+- 权限收窄到 `sidePanel`、`storage`、`tabs`、`scripting`。
+
 ## v1.3.9 更新
 
 - B 站的浮层不再压在画面上：只有鼠标移到播放器上时才淡入，移开就淡出，画面保持干净。页面刚打开时会短暂露一次面，免得按钮彻底找不到。
@@ -137,7 +145,7 @@ YouTube Digest 是一个需要自行提供 API Key 的开源项目，通过 GitH
 
 ## 设置 API Key
 
-YouTube Digest 只需要你在自己的服务账号中准备一个 Key：**DeepSeek API Key**，用于生成概览、讲解内容、翻译和自动润色笔记。字幕本身不需要任何 Key，它来自你打开的页面，或来自你自己机器上的 Whisper。
+YouTube Digest 只需要你在自己的服务账号中准备一个 Key：**DeepSeek API Key**，用于生成概览、讲解内容、翻译和自动润色笔记。字幕本身不需要任何 Key，它直接来自你打开的页面。
 
 ### 获取 DeepSeek API Key
 
@@ -184,35 +192,19 @@ API Key 和设置保存在你设备上的 Chrome 扩展本地存储中。发布�
 
 Shorts、直播、私密视频、受访问限制的视频，以及没有原生字幕的视频可能无法使用。目前没有测试 Firefox、Safari、移动浏览器或其他 Chromium 浏览器。
 
-## 字幕来源路由（两种场景）
+## 字幕来源路由
 
-YouTube Digest 按可用性路由字幕获取。链路里没有任何按次计费的字幕服务，所以探测失败不会产生费用：
+YouTube Digest 只读页面上已有的字幕，链路里没有任何按次计费的服务，也没有录音，所以探测失败不会产生费用：
 
-1. **平台原生字幕**：扩展先在当前页面探测原生字幕，例如 YouTube 的 `captionTracks`、B 站免费字幕接口、或通用 HTML5 `video.textTracks`。YouTube 的 `/api/timedtext` 现在要求 proof-of-origin token，缺 token 时返回 **HTTP 200 但响应体为空**；`caption-pot-hook.js` 会记下播放器自己请求过的签名 URL，内容脚本据此取回带完整时间轴的字幕轨。拿不到签名 URL 时，内容脚本改走 YouTube 网页版"显示转录文字"背后的 `get_transcript` 接口，这条路不需要 token。B 站接口只对已登录会话返回字幕。
+1. **平台原生字幕，三条互相独立的通道**：先看 YouTube 的 `captionTracks`、B 站免费字幕接口、或通用 HTML5 `video.textTracks`。YouTube 的 `/api/timedtext` 现在要求 proof-of-origin token，缺 token 时返回 **HTTP 200 但响应体为空**；`caption-pot-hook.js` 会记下播放器自己请求过的签名 URL，内容脚本据此取回带完整时间轴的字幕轨。
+2. 拿不到签名 URL 时，改走 YouTube 网页版"显示转录文字"背后的 `get_transcript` 接口，这条路不需要 token，也不依赖 `captionTracks` 是否已经就绪。
+3. 前两条都失败时，直接读页面自己渲染的转录面板（`ytd-transcript-segment-renderer`）。这份内容由 YouTube 自己生成，pot 与登录态都由播放器处理，是最后一道原生兜底。
 
-2. **无原生字幕 → 本地 Whisper 转录（可选）**：如果没有平台字幕、且你在设置里开启了**本地 Whisper**，扩展会通过 `chrome.tabCapture` 捕获当前标签页的音频（对跨域播放器有效），发送到本地 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) 服务（`whisper/whisper_server.py`）转写。转录在你的电脑上完成，音频不会离开本机。
-
-两条路都拿不到文本时，面板会如实说明情况并指向 Whisper 设置，不会把视频地址悄悄上传到任何地方。
-
-### 运行本地 Whisper 服务（可选）
-
-```bash
-pip install -r whisper/requirements.txt
-python whisper/whisper_server.py --model small --port 8000
-```
-
-然后在设置中开启**本地 Whisper**，保持默认服务地址 `http://127.0.0.1:8000`，点一下**检查连接**确认返回模型名和响应时间。完整步骤（含模型对比表和排错表）随扩展一起发布在 `whisper-guide.html`：设置页有入口，服务没启动时面板也会直接打开它。和以前一样的限制：DRM / 加密流、以及尚未开始播放的视频无法捕获音频，所以该兜底只对可播放、未加密的视频有效。
-
-两个实操注意点：
-
-- B 站字幕接口只对**已登录**的会话返回字幕轨道。未登录时探测结果为空，流程会落到 Whisper 兜底。
-- Chrome 只允许在"扩展已在该标签页被唤醒"之后捕获标签页音频，而**唤醒只认工具栏图标或快捷键**：页面里的 Digest 按钮能打开面板，但它不算授权。没唤醒时 Chrome 会返回 `Extension has not been invoked for the current page`，面板会提示你点一次图标，点完会自动接着转录，不用再点第二次。
-- 也可以用快捷键 **Alt+Shift+9** 代替点图标：效果相同（同样会授予当前标签页的采集授权），适合图标被折叠进"扩展程序"菜单时使用。注意**刷新页面会撤销授权**，刷新后需要再按一次。
-- 授权来自 manifest 里的 `activeTab` 权限加上一次真实调用；缺少 `activeTab` 时无论点多少次图标都会失败，所以不要把它从 `permissions` 里删掉。
+B 站接口只对已登录会话返回字幕。三条通道都拿不到时，面板会区分两种情况：视频本身没有字幕（作者没上传、YouTube 也没生成），或者这次没读到、刷新页面即可恢复。
 
 ## 后续开发方案：用 Groq 做云端转录（尚未实现）
 
-移除字幕接口之后，没有字幕的视频只能靠本地 Whisper，而它目前只录 5 到 120 秒的播放窗口。这个长度够采样，不够做摘要。计划中的补救方案是可选的云端路径，用 [Groq](https://groq.com/) 而不是字幕供应商，因为 Groq 是直接转录音频，而不是把已有字幕代理一遍。
+完全没有任何字幕的视频暂时无法生成 Digest：扩展只读页面上已有的字幕，而录音兜底已在 v1.4.0 移除（它本来也只覆盖 30 秒，够采样，不够做摘要）。计划中的补救方案是可选的云端路径，用 [Groq](https://groq.com/) 而不是字幕供应商，因为 Groq 是直接转录音频，而不是把已有字幕代理一遍。
 
 选它的理由：
 
@@ -222,8 +214,8 @@ python whisper/whisper_server.py --model small --port 8000
 
 实现步骤：
 
-1. 设置项：新增 `transcriptionProvider: "local" | "groq"`、`groqApiKey`、`groqModel`（默认 `whisper-large-v3-turbo`）。Key 与 DeepSeek Key 一样存在 `chrome.storage.local`，并且绝不默认选中 Groq。
-2. 录音：`handleCaptureAudioTranscribe` 已经掌握 tabCapture 流程。把 5 到 120 秒的硬限制改成按请求传入，边播放边录完整条音轨；或者把 `MediaRecorder` 输出按 25MB 以内切片（压缩语音大约一小时）后按顺序上传。
+1. 设置项：新增 `transcriptionProvider: "off" | "groq"`、`groqApiKey`、`groqModel`（默认 `whisper-large-v3-turbo`）。Key 与 DeepSeek Key 一样存在 `chrome.storage.local`，并且绝不默认选中 Groq。
+2. 录音：v1.4.0 已删除 tabCapture 与 offscreen 录音代码，需要重新引入一条完整的录制流水线，边播放边录完整条音轨；或者把 `MediaRecorder` 输出按 25MB 以内切片（压缩语音大约一小时）后按顺序上传。
 3. 转录：每片用 `response_format=verbose_json`，把返回分段的开始时间加上该片的偏移量。复用 `YTD_SUBTITLE_SOURCES.buildTranscriptFromChunks`，面板、时间戳跳转、笔记和翻译都不用改。
 4. 门禁：保持「没有明确点击就不花钱」的规则。请求前显示预计音频时长和费用。
 5. 缓存：仍写入 `digest_<videoId>`，并提升 `DIGEST_CACHE_VERSION`，避免切换服务商后把 30 秒样本当成完整字幕。
@@ -273,7 +265,7 @@ YouTube Digest 使用原生 HTML、CSS 和 JavaScript，没有构建步骤，很
 
 YouTube Digest 会直接从扩展向服务商发送请求：
 
-1. 字幕来自你已经打开的页面；需要音频转录时，只发送到你配置的本地 Whisper 服务。字幕获取全程不离开你的电脑。
+1. 字幕来自你已经打开的页面，全程不离开你的电脑，也不经过任何付费服务。
 2. 当你使用 AI 功能时，把字幕和相关视频信息发送给 DeepSeek。
 3. 翻译或讲解等功能只发送当前需要的内容，例如选中的文本和上下文，或少量字幕分段。
 4. API Key、设置、笔记和最近缓存保存在 Chrome 本地。
@@ -306,8 +298,9 @@ YouTube Digest 没有账号系统、广告、分析统计或行为追踪。DeepS
 ### 找不到字幕
 
 - 确认视频是公开的，并且有原生字幕。
-- 如果你没有在设置中开启**本地 Whisper**，扩展不会自行转录音频。开启它（并启动 `whisper/whisper_server.py`）即可获得音频转录兜底。
-字幕获取不经过任何付费服务，重试也不产生费用。如果平台没有字幕轨、而 Whisper 又没开启，请在设置中开启并启动 `whisper/whisper_server.py`；没有云端兜底可以依赖。
+- 面板会区分两种情况：出现"这个视频没有字幕"说明作者没上传、YouTube 也没生成，没有内容可读。
+- 出现"这次没能读到字幕"说明字幕存在但页面没交出来，通常是扩展更新后页面还没刷新。点 **Reload page & retry** 即可。
+- 字幕获取不经过任何付费服务，重试不产生费用。扩展不做录音，也没有云端转录，所以完全没有字幕的视频无法生成 Digest。
 
 ### AI 请求失败
 

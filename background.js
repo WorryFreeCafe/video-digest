@@ -3,7 +3,7 @@
  *
  * This is the "brain" of the extension. It runs in the background and handles:
  * 1. Opening the side panel when the user clicks the extension icon
- * 2. Probing platform-native transcripts and delegating audio to local Whisper
+ * 2. Probing platform-native transcripts (YouTube / Bilibili / HTML5 video)
  * 3. Calling DeepSeek to analyze the transcript
  * 4. Sending results back to the side panel
  *
@@ -13,7 +13,7 @@
 
 // Import safe defaults and validation helpers. Secret keys live in
 // chrome.storage.local and are never part of the extension source.
-importScripts("settings.js", "subtitle-sources.js", "whisper-client.js");
+importScripts("settings.js", "subtitle-sources.js");
 
 const DEBUG = false;
 const AI_PROVIDER_IDLE_TIMEOUT_MS = 50_000;
@@ -248,22 +248,13 @@ chrome.action.onClicked.addListener((tab) => {
     enabled: true,
   });
   chrome.sidePanel.open({ tabId: tab.id });
-
-  // This click is what grants activeTab (the "extension has been invoked"
-  // flag Chrome checks before tab audio capture). Tell the panel so it can
-  // resume a capture that was blocked a second ago.
-  chrome.storage.local.set({ ytd_last_invoke: Date.now() });
-  chrome.runtime
-    .sendMessage({ action: "extensionInvoked", tabId: tab.id })
-    .catch(() => {});
 });
 
 /**
  * Keep the click on our own handler: `openPanelOnActionClick: true` opens the
- * panel straight from Chrome's UI without dispatching action.onClicked, and
- * without granting activeTab. tabCapture then always fails with "Extension
- * has not been invoked for the current page" no matter how often the icon is
- * clicked. Explicitly reset it in case an older build stored it.
+ * panel straight from Chrome's UI without dispatching action.onClicked, which
+ * makes it impossible to scope the panel to the tab that was clicked.
+ * Explicitly reset it in case an older build stored it.
  */
 const panelBehavior = chrome.sidePanel?.setPanelBehavior?.({
   openPanelOnActionClick: false,
@@ -385,42 +376,10 @@ chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // We need to return true to indicate we'll respond asynchronously
   if (message.action === "fetchTranscriptSmart") {
-    // 字幕预检编排：优先平台原生字幕（免费）→ Whisper 音频转录 → 给出提示。
+    // 字幕获取编排：平台原生字幕（YouTube / B 站 / HTML5 track）。
     handleFetchTranscriptSmart(message.videoId, message.tabId)
       .then(sendResponse)
       .catch((err) => sendResponse({ error: err.message, source: "smart" }));
-    return true;
-  }
-
-  if (message.action === "captureAudioTranscribe") {
-    // 手动触发：捕获当前播放音频并交给本地 Whisper 转录。
-    // 第三个参数才是 options；第二位是 settings（null 表示实时读取）。
-    handleCaptureAudioTranscribe(message.tabId, null, message.options)
-      .then(sendResponse)
-      .catch((err) => sendResponse({ error: err.message }));
-    return true;
-  }
-
-  if (message.action === "whisperHealth") {
-    // 设置页的“检查连接”，也用于面板在转录前确认服务是否在线。
-    handleWhisperHealth(message.url)
-      .then(sendResponse)
-      .catch((err) =>
-        sendResponse({
-          ok: false,
-          status: "error",
-          message: `探活失败：${err.message}`,
-        }),
-      );
-    return true;
-  }
-
-  if (message.action === "openWhisperGuide") {
-    // 安装 / 启动指南是扩展自带页面，离线可用。
-    chrome.tabs
-      .create({ url: chrome.runtime.getURL("whisper-guide.html") })
-      .then((tab) => sendResponse({ ok: true, tabId: tab?.id }))
-      .catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
   }
 
@@ -713,23 +672,23 @@ async function getPlayerVideoDetails(tabId) {
 }
 
 // ============================================================
-// TRANSCRIPT FETCHING (PLATFORM-NATIVE + LOCAL WHISPER)
+// TRANSCRIPT FETCHING (PLATFORM-NATIVE)
 // ============================================================
 
 /**
- * 字幕预检编排：先尝试免费获取平台原生字幕，再尝试本地 Whisper 音频转录，
- * 都没有就如实告诉用户缺什么。
+ * 字幕获取编排：只走平台原生字幕（YouTube / B 站 / HTML5 track）。
+ *
+ * 全部原生通道都失败时不再录音转录，而是如实返回原因，让面板给出可操作的
+ * 提示（刷新页面重试 / 该视频确实没有字幕）。
  *
  * @param {string} videoId - 平台视频 ID（YouTube 或 B站标识）
  * @param {number} [tabId] - 当前标签页 ID，用于向 content script 探测
  * @returns {Object}
  */
-async function handleFetchTranscriptSmart(videoId, tabId, options = {}) {
-  const settings = await getSettings();
+async function handleFetchTranscriptSmart(videoId, tabId) {
   const diagnostics = {};
 
-  // 1) 平台原生字幕预检（免费）
-  const platform = await probePlatformSubtitle(videoId, tabId, settings, diagnostics);
+  const platform = await probePlatformSubtitle(videoId, tabId, diagnostics);
   if (platform && platform.success !== false && platform.transcript?.length) {
     return YTD_SUBTITLE_SOURCES.sourceResult("platform", {
       transcript: platform.transcript,
@@ -740,51 +699,27 @@ async function handleFetchTranscriptSmart(videoId, tabId, options = {}) {
     });
   }
 
-  // 平台这一侧为什么没成功，必须一起带回去：否则面板只会看到 Whisper 的
-  // 错误，用户会以为插件"现在必须先开本地 Whisper"。
   const platformFailure = diagnostics.platformFailure || "NO_CAPTION_TRACKS";
   const platformDetail = diagnostics.platformDetail || "";
+  // 有字幕轨、只是这一取没成功（pot 没截到 / 页面早于扩展加载）时，刷新页面
+  // 大多能恢复；连字幕轨和转录面板入口都没有就只能如实说没有。
+  const retryable =
+    new Set([
+      "POT_UNAVAILABLE",
+      "EMPTY_CAPTION_BODY",
+      "CONTENT_SCRIPT_MISSING",
+      "PLATFORM_PROBE_FAILED",
+    ]).has(platformFailure) ||
+    (!!platformDetail &&
+      !/NO_TRANSCRIPT_BUTTON|NO_TRANSCRIPT_PARAMS/.test(platformDetail));
 
-  // 2) 本地 Whisper 音频转录兜底（若用户已启用）。
-  // platformOnly 用于"保存笔记"这类只需要定位一句字幕的场景：不能为了这一句
-  // 去录几十秒音频，那会让按钮卡住半分钟。
-  if (settings.whisperEnabled && tabId && !options.platformOnly) {
-    const whisper = await handleCaptureAudioTranscribe(tabId, settings, {
-      silent: true,
-    });
-    if (whisper && whisper.success && whisper.transcriptText) {
-      return YTD_SUBTITLE_SOURCES.sourceResult("whisper", {
-        transcript: whisper.transcript,
-        transcriptText: whisper.transcriptText,
-        transcriptTextTimestamped: whisper.transcriptTextTimestamped,
-        language: null,
-        note: "无原生字幕，已通过本地 Whisper 转录（仅覆盖所捕获的一小段音频）。",
-      });
-    }
-    return YTD_SUBTITLE_SOURCES.sourceResult("whisper", {
-      success: false,
-      error: whisper?.error || "WHISPER_FAILED",
-      message:
-        whisper?.message ||
-        "无原生字幕，且本地 Whisper 转录失败。请确认视频正在播放、Whisper 服务已启动后重试。",
-      // 让面板能把"服务没启动"变成一个可直接点开的安装/启动指南，而不是
-      // 一句笼统的失败提示。
-      canOpenWhisperGuide: !!whisper?.canOpenWhisperGuide,
-      whisperUrl: whisper?.whisperUrl || settings.whisperServerUrl,
-      platformFailure,
-      platformDetail,
-    });
-  }
-
-  // 3) 无字幕、未启用 Whisper：告诉用户唯一可用的补救方式
   return YTD_SUBTITLE_SOURCES.sourceResult("none", {
     success: false,
     error: "NO_TRANSCRIPT",
-    message:
-      "该视频未检测到原生字幕，且未启用本地 Whisper。请在设置中开启本地 Whisper 后重试。",
-    canEnableWhisper: true,
-    canOpenWhisperGuide: true,
-    whisperUrl: settings.whisperServerUrl,
+    message: retryable
+      ? "这个视频有字幕轨，但这次没能读到（页面可能是在扩展更新前打开的）。刷新页面后再点 Digest 通常就能拿到完整字幕。"
+      : "这个视频没有可用的字幕（作者未上传，也没有自动字幕）。YouTube Digest 只基于字幕工作，这类视频无法生成 Digest。",
+    retryable,
     platformFailure,
     platformDetail,
   });
@@ -796,7 +731,7 @@ async function handleFetchTranscriptSmart(videoId, tabId, options = {}) {
  * buildTranscriptFromChunks / fetchBilibiliSubtitle 只返回 transcript 本体，
  * 不带 success / source 字段；而 handleFetchTranscriptSmart 以 platform.success
  * 作为"原生字幕可用"的判据。少了这层包装，B 站/YouTube/通用 video 的原生字幕
- * 会被整体判为不可用，直接掉到 Whisper 兜底（表现为"未检测到原生字幕"）。
+ * 会被整体判为不可用（表现为"未检测到原生字幕"）。
  */
 function asPlatformResult(built, note) {
   if (!built || !Array.isArray(built.transcript) || built.transcript.length === 0) {
@@ -815,8 +750,7 @@ function asPlatformResult(built, note) {
  * 等 YouTube 的字幕轨就绪。
  *
  * 用户经常是"刚打开视频就点 Digest"，此时播放器 data 还没带上 captions，
- * 一次读取失败并不代表视频没有字幕。之前这里只读一次，读不到就直接掉到
- * Whisper 兜底，于是同一视频"有时能出字幕、有时报 Whisper 没启动"。
+ * 一次读取失败并不代表视频没有字幕。这里轮询一段时间再放弃。
  *
  * @param {number} tabId
  * @param {number} [timeoutMs]
@@ -837,17 +771,15 @@ async function waitForCaptionTracks(tabId, timeoutMs = 4000) {
 /**
  * 探测平台原生字幕（免费通道）。
  *
- * `diagnostics` 用来把"为什么没拿到字幕"带回面板。失败时只显示 Whisper 的
- * 错误会让用户误以为插件变成了 Whisper 依赖，实际原因常常在平台这一侧
- * （页面没加载完、扩展更新后未刷新、视频确实没有字幕轨）。
+ * `diagnostics` 用来把"为什么没拿到字幕"带回面板：失败时面板要能区分
+ * "该视频确实没有字幕"和"有字幕但这次没读到，刷新可恢复"。
  *
  * @param {string} videoId
  * @param {number} tabId
- * @param {Object} settings
  * @param {Object} [diagnostics]
  * @returns {Object|null}
  */
-async function probePlatformSubtitle(videoId, tabId, settings, diagnostics = {}) {
+async function probePlatformSubtitle(videoId, tabId, diagnostics = {}) {
   if (!tabId) {
     diagnostics.platformFailure = "NO_TAB";
     return null;
@@ -890,21 +822,19 @@ async function probePlatformSubtitle(videoId, tabId, settings, diagnostics = {})
     }
   }
 
-  // YouTube：优先尝试页面 captionTracks（免费），失败则交由调用方决定
+  // YouTube：三条原生通道依次尝试，全部免费、不需要任何本地服务。
   // 这里尝试从 player 取字幕轨道。
   try {
     const { tracks } = await waitForCaptionTracks(tabId);
     if (!tracks.length) {
-      // 视频本身没有字幕轨，和"有字幕但取不到"是两种完全不同的处境，
-      // 面板要给不同的提示。
+      // 播放器还没吐出轨道并不代表视频没有字幕：后面两条通道不依赖它。
       diagnostics.platformFailure = "NO_CAPTION_TRACKS";
-      return null;
     }
     const trackLangs = tracks.map((t) => t.lang).filter(Boolean);
 
     // 1) 直接请求 baseUrl。YouTube 现在对没有 pot（proof-of-origin token）
     //    的请求返回 **HTTP 200 + 空响应体**，所以必须按内容长度判断，
-    //    只看 resp.ok 会把空字幕当成成功，最后掉进 30 秒 Whisper 兜底。
+    //    只看 resp.ok 会把空字幕当成成功，误判成"已有字幕轨"。
     const first = tracks[0];
     if (first && first.baseUrl) {
       try {
@@ -932,19 +862,49 @@ async function probePlatformSubtitle(videoId, tabId, settings, diagnostics = {})
 
     // 2) pot 通道：让页面交出播放器自己带签名的 timedtext URL，
     //    改写 lang 后即可拿到整条字幕轨（含完整时间轴）。
-    const potResult = await requestYoutubeCaptionFromPage(tabId, trackLangs, diagnostics);
-    if (potResult && potResult.success) {
-      const parsed = parseYoutubeCaptionBody(potResult.text);
+    if (tracks.length) {
+      const potResult = await requestYoutubeCaptionFromPage(
+        tabId,
+        trackLangs,
+        diagnostics,
+      );
+      if (potResult && potResult.success) {
+        const parsed = parseYoutubeCaptionBody(potResult.text);
+        if (parsed.length) {
+          const built = YTD_SUBTITLE_SOURCES.buildTranscriptFromChunks(parsed);
+          if (potResult.lang) built.language = potResult.lang;
+          return asPlatformResult(built, "来自 YouTube 原生字幕。");
+        }
+        diagnostics.platformFailure = "EMPTY_CAPTION_BODY";
+      }
+    }
+
+    // 3) get_transcript：不需要 pot，也不依赖 captionTracks。播放器数据
+    //    还没就绪、pot 没截到时，这条通道往往仍然可用。
+    const inner = await requestYoutubeTranscriptInner(tabId, videoId, diagnostics);
+    if (inner) {
+      const parsed = parseYoutubeCaptionBody(inner.text);
       if (parsed.length) {
-        const built = YTD_SUBTITLE_SOURCES.buildTranscriptFromChunks(parsed);
-        if (potResult.lang) built.language = potResult.lang;
         return asPlatformResult(
-          built,
-          "来自 YouTube 原生字幕。",
+          YTD_SUBTITLE_SOURCES.buildTranscriptFromChunks(parsed),
+          "来自 YouTube 转录接口。",
         );
       }
       diagnostics.platformFailure = "EMPTY_CAPTION_BODY";
     }
+
+    // 4) 最后一道：直接读页面自己的「显示转录文字」面板。
+    const panel = await requestYoutubeTranscriptPanel(tabId, diagnostics);
+    if (panel) {
+      const parsed = parseYoutubeCaptionBody(panel.text);
+      if (parsed.length) {
+        return asPlatformResult(
+          YTD_SUBTITLE_SOURCES.buildTranscriptFromChunks(parsed),
+          "来自 YouTube 转录面板。",
+        );
+      }
+    }
+
     return null;
   } catch (e) {
     diagnostics.platformFailure = "PLATFORM_PROBE_FAILED";
@@ -991,6 +951,50 @@ async function requestYoutubeCaptionFromPage(tabId, trackLangs, diagnostics = {}
   }
   return res;
 }
+
+/**
+ * 让内容脚本调网页版"显示转录文字"的 inner API（不需要 pot）。
+ *
+ * 这条通道不依赖 captionTracks，所以即使播放器还没吐出轨道也能用；它是
+ * pot 通道失败后最可靠的一条原生路径。
+ */
+async function requestYoutubeTranscriptInner(tabId, videoId, diagnostics = {}) {
+  try {
+    const res = await chrome.tabs.sendMessage(tabId, {
+      action: "fetchYoutubeTranscriptInner",
+      videoId,
+    });
+    if (res && res.success && res.text) return res;
+    if (res?.reason) {
+      debugLog("[YouTube Digest BG] get_transcript failed:", res.reason);
+      diagnostics.platformDetail = res.reason;
+    }
+  } catch (_e) {
+    diagnostics.platformFailure = "CONTENT_SCRIPT_MISSING";
+  }
+  return null;
+}
+
+/**
+ * 最后一道兜底：读页面自己渲染的转录面板 DOM。
+ * 走 YouTube 的 UI，pot 与鉴权都由播放器处理。
+ */
+async function requestYoutubeTranscriptPanel(tabId, diagnostics = {}) {
+  try {
+    const res = await chrome.tabs.sendMessage(tabId, {
+      action: "fetchYoutubeTranscriptPanel",
+    });
+    if (res && res.success && res.text) return res;
+    if (res?.reason) {
+      debugLog("[YouTube Digest BG] transcript panel failed:", res.reason);
+      diagnostics.platformDetail = res.reason;
+    }
+  } catch (_e) {
+    diagnostics.platformFailure = "CONTENT_SCRIPT_MISSING";
+  }
+  return null;
+}
+
 
 /**
  * 把 pot 钩子补注入到已打开的页面（MAIN world）。
@@ -1056,7 +1060,7 @@ function parseYoutubeCaptionJson3(json) {
  *
  * 必须在 MAIN world 注入：content script 默认跑在 isolated world，页面的
  * `window.__INITIAL_STATE__` 在隔离世界里是 undefined，直接读会导致 cid
- * 永远为 null，B 站免费字幕路径整体失效（只能退回 Whisper）。
+ * 永远为 null，B 站免费字幕路径整体失效（表现为"未检测到原生字幕"）。
  *
  * 返回值用 JSON 字符串传回，避免结构化克隆对页面对象的限制。
  */
@@ -1169,238 +1173,6 @@ function parseYoutubeCaptionXml(xml) {
     if (raw.trim()) chunks.push({ start: start || 0, text: raw.trim() });
   }
   return chunks;
-}
-
-/**
- * 本地 Whisper 服务是用户自己启动的进程，随时可能没开或地址不对。
- * 探活逻辑放在 whisper-client.js，这里只负责和设置联动。
- */
-let whisperClientInstance = null;
-
-/** 惰性创建：让没有加载 whisper-client.js 的测试沙箱也能加载本文件。 */
-function getWhisperClient() {
-  if (!whisperClientInstance) {
-    whisperClientInstance = YTD_WHISPER_CLIENT.createWhisperClient();
-  }
-  return whisperClientInstance;
-}
-
-/**
- * 读取当前设置并探活，供设置页“检查连接”和面板预检共用。
- * `urlOverride` 让设置页可以先改地址再检查，不必先保存。
- * 永远返回结构化结果，调用方不需要区分“服务没开”和“请求抛异常”。
- * @param {string} [urlOverride]
- * @returns {Promise<Object>}
- */
-async function handleWhisperHealth(urlOverride) {
-  const settings = await getSettings();
-  const targetUrl =
-    String(urlOverride || "").trim() || settings.whisperServerUrl;
-  const probe = await getWhisperClient().probe(targetUrl);
-  return {
-    ...probe,
-    enabled: !!settings.whisperEnabled,
-    configuredUrl: settings.whisperServerUrl,
-    configuredModel: settings.whisperModel,
-  };
-}
-
-/**
- * 捕获当前标签页音频并交给本地 Whisper 转录。
- *
- * Chrome MV3 的 service worker 没有 DOM，也就没有 getUserMedia/MediaRecorder。
- * 这里只调用 chrome.tabCapture.getMediaStreamId() 拿到一次性流 id，把它交给
- * Offscreen Document（offscreen.js）完成录制并 POST 给本地 Whisper。
- * 这也能捕获 YouTube/B站等跨域播放器的音频，不依赖 video.captureStream。
- *
- * 限制：视频必须正在播放才能捕获到声音；DRM/加密流无法捕获。
- * @param {number} tabId
- * @param {Object} settings
- * @param {Object} [opts]
- * @returns {Object}
- */
-async function handleCaptureAudioTranscribe(tabId, settings = null, opts = {}) {
-  const cfg = settings || (await getSettings());
-  if (!cfg.whisperEnabled) {
-    return {
-      success: false,
-      error: "WHISPER_DISABLED",
-      message: "本地 Whisper 未启用。请在设置中开启。",
-    };
-  }
-  if (!tabId) {
-    return {
-      success: false,
-      error: "NO_TAB",
-      message: "缺少标签页信息，无法捕获音频。",
-    };
-  }
-
-  // 先确认目标标签页存在。
-  let tab = null;
-  try {
-    tab = await chrome.tabs.get(tabId);
-  } catch (_e) {
-    return {
-      success: false,
-      error: "NO_TAB",
-      message: "找不到目标标签页，请重新打开侧边栏后重试。",
-    };
-  }
-  if (!tab || !tab.url || !/^https?:/i.test(tab.url)) {
-    return {
-      success: false,
-      error: "UNSUPPORTED_TAB",
-      message: "当前标签页不是网页，无法捕获音频。",
-    };
-  }
-
-  const seconds = Math.min(Math.max(Number(opts.seconds) || 30, 5), 120);
-
-  // 探活放在录音之前：服务没启动时立刻返回可操作的提示，而不是让用户先等
-  // 30 秒录音、再收到一句 "Failed to fetch"。`http-error` / `unexpected`
-  // 说明地址上有服务在响应但不像 whisper_server.py，交给后面的真实请求判断，
-  // 避免把用户自建的服务误判为不可用。
-  const probe = await getWhisperClient().probe(cfg.whisperServerUrl);
-  if (!probe.ok && (probe.status === "unreachable" || probe.status === "timeout")) {
-    return {
-      success: false,
-      source: "whisper",
-      error: probe.status === "timeout" ? "WHISPER_TIMEOUT" : "WHISPER_UNREACHABLE",
-      whisperUrl: probe.url,
-      canOpenWhisperGuide: true,
-      message: `${probe.message} 启动后回到面板重试，或打开安装指南。`,
-    };
-  }
-
-  try {
-    const text = await captureViaOffscreen(tabId, {
-      seconds,
-      whisperUrl: cfg.whisperServerUrl,
-      model: cfg.whisperModel,
-    });
-    if (!text || !text.trim()) {
-      return {
-        success: false,
-        error: "EMPTY_TRANSCRIPT",
-        message: "音频已捕获但转录为空。请确认视频已播放出声音，或稍后重试。",
-      };
-    }
-    const built = YTD_SUBTITLE_SOURCES.buildTranscriptFromPlainText(text);
-    // 必须带 success / source：handleFetchTranscriptSmart 以 whisper.success
-    // 判定兜底是否可用，直接返回 buildTranscriptFromPlainText 的裸对象会让
-    // 真实转录成功也被当成 WHISPER_FAILED。
-    return YTD_SUBTITLE_SOURCES.sourceResult("whisper", {
-      ...built,
-      note: `通过本地 Whisper 转录（只捕获了当前播放位置后的 ${seconds} 秒）`,
-    });
-  } catch (e) {
-    const raw = String(e?.message || e);
-    // Chrome only allows tabCapture after the extension has been invoked on
-    // that tab (activeTab). Without this mapping the side panel shows the raw
-    // English DevTools-style error, which reads like a bug rather than a step
-    // the user has to take.
-    if (/has not been invoked/i.test(raw)) {
-      return {
-        success: false,
-        error: "CAPTURE_NOT_INVOKED",
-        message:
-          "Chrome 要求先在这个网页上唤醒一次扩展，才允许捕获标签页音频。请点一下工具栏的 YouTube Digest 图标（或按 Alt+Shift+9），面板会自动继续转录。",
-      };
-    }
-    return {
-      success: false,
-      error: "TRANSCRIBE_ERROR",
-      message: `转录失败：${raw}`,
-    };
-  }
-}
-
-const OFFSCREEN_DOCUMENT_PATH = "offscreen.html";
-
-/**
- * Create the offscreen document once and reuse it for later recordings.
- * MV3 service workers have no DOM, so they cannot call getUserMedia() or
- * MediaRecorder; the offscreen document owns the MediaStream instead.
- */
-async function ensureOffscreenDocument() {
-  const url = chrome.runtime.getURL(OFFSCREEN_DOCUMENT_PATH);
-  if (chrome.runtime.getContexts) {
-    const existing = await chrome.runtime.getContexts({
-      contextTypes: ["OFFSCREEN_DOCUMENT"],
-      documentUrls: [url],
-    });
-    if (existing && existing.length > 0) return;
-  }
-  try {
-    await chrome.offscreen.createDocument({
-      url: OFFSCREEN_DOCUMENT_PATH,
-      reasons: ["USER_MEDIA"],
-      justification:
-        "Capture the active tab's audio and send it to the local Whisper service.",
-    });
-  } catch (error) {
-    // A concurrent recording may have created the document already.
-    if (!/single offscreen document/i.test(error?.message || "")) throw error;
-  }
-}
-
-/**
- * Ask Chrome for a one-shot stream id for the target tab. Unlike
- * tabCapture.capture(), getMediaStreamId() is safe to call from a service
- * worker; the id is consumed by getUserMedia() in the offscreen document.
- * @param {number} tabId
- * @returns {Promise<string>}
- */
-async function getTabCaptureStreamId(tabId) {
-  if (!chrome.tabCapture?.getMediaStreamId) {
-    throw new Error(
-      "chrome.tabCapture.getMediaStreamId 不可用，需要 Chrome 116+ 与 tabCapture 权限。",
-    );
-  }
-  return chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
-}
-
-/**
- * Delegate recording and transcription to the offscreen document.
- * @param {number} tabId
- * @param {{seconds:number, whisperUrl:string, model:string}} options
- * @returns {Promise<string>} transcribed text
- */
-async function captureViaOffscreen(tabId, options) {
-  await ensureOffscreenDocument();
-  let streamId;
-  try {
-    streamId = await getTabCaptureStreamId(tabId);
-  } catch (error) {
-    if (!/active stream/i.test(error?.message || "")) throw error;
-    // A previous recording was interrupted (offscreen document killed, tab
-    // closed mid-record) and Chrome still counts its stream as active, so the
-    // tab becomes un-capturable. Closing the document releases it; ask again.
-    await chrome.offscreen.closeDocument().catch(() => {});
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    await ensureOffscreenDocument();
-    streamId = await getTabCaptureStreamId(tabId);
-  }
-  let response;
-  try {
-    response = await chrome.runtime.sendMessage({
-      action: "recordTabAudio",
-      options: { ...options, streamId },
-    });
-  } catch (error) {
-    // The id was minted but never consumed, which would leave the tab locked
-    // for the next attempt; drop the offscreen document to release it.
-    await chrome.offscreen.closeDocument().catch(() => {});
-    throw new Error(`无法与 offscreen document 通信：${error.message}`);
-  }
-  if (!response) {
-    throw new Error("offscreen document 没有响应，请重新加载扩展后重试。");
-  }
-  if (!response.success) {
-    throw new Error(response.error || "音频转录失败。");
-  }
-  return response.text;
 }
 
 // ============================================================
@@ -1779,9 +1551,7 @@ async function handleSaveNote(
     // no such guarantee, but the message came from a content script, so the
     // tab is still available and the platform captions can be read on demand.
     if (!transcript && meta.tabId) {
-      const fetched = await handleFetchTranscriptSmart(videoId, meta.tabId, {
-        platformOnly: true,
-      });
+      const fetched = await handleFetchTranscriptSmart(videoId, meta.tabId);
       if (
         fetched?.success &&
         Array.isArray(fetched.transcript) &&

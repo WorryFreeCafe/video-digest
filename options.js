@@ -9,30 +9,7 @@ const YTD_OPTIONS = (() => {
       languageGroupLabel: "Interface language",
       heading: "Bring your own API keys",
       lede:
-        "Keys stay in this Chrome profile and are sent only to DeepSeek. Your local Whisper server stays on your own machine. This open-source extension has no developer server or analytics.",
-      whisperProvider: "Local Whisper (fallback)",
-      whisperEnabledLabel:
-        "Enable local Whisper transcription when no native subtitle exists",
-      whisperServerUrlLabel: "Whisper server URL",
-      whisperModelLabel: "Whisper model",
-      whisperHelp:
-        "Runs locally via whisper_server.py (faster-whisper FastAPI). Only captures the currently-playing audio window (~2 min). DRM / encrypted streams cannot be captured.",
-      whisperCheck: "Check connection",
-      whisperChecking: "Checking...",
-      whisperGuideLink: "Open the setup guide",
-      whisperConnected: ({ model, ms }) =>
-        model
-          ? `Connected. Model: ${model}. Responded in ${ms} ms.`
-          : `Connected. A model loads on the first transcription. Responded in ${ms} ms.`,
-      whisperUnreachable:
-        "Not reachable. Start whisper/whisper_server.py, then check again.",
-      whisperTimeout:
-        "No response in time. The service may still be loading a model, or the port is busy.",
-      whisperHttpError: ({ status, url }) =>
-        `${url} answered with HTTP ${status}. That address is probably not whisper_server.py.`,
-      whisperUnexpected: ({ url }) =>
-        `${url} answered, but not like a Whisper server. Check the address and port.`,
-      whisperProbeFailed: "Could not check the service. Try again.",
+        "Keys stay in this Chrome profile and are sent only to DeepSeek. This open-source extension has no developer server or analytics.",
       aiProvider: "AI provider",
       providerSummaryLabel: "Supported AI provider",
       providerBadge: "Supported in this version",
@@ -95,29 +72,7 @@ const YTD_OPTIONS = (() => {
       languageGroupLabel: "界面语言",
       heading: "使用你自己的 API 密钥",
       lede:
-        "密钥仅保存在当前 Chrome 个人资料中，只会发送给 DeepSeek。本地 Whisper 服务始终运行在你自己的机器上。本开源扩展没有开发者服务器，也不使用分析服务。",
-      whisperProvider: "本地 Whisper（兜底）",
-      whisperEnabledLabel: "无原生字幕时启用本地 Whisper 转录",
-      whisperServerUrlLabel: "Whisper 服务地址",
-      whisperModelLabel: "Whisper 模型",
-      whisperHelp:
-        "通过 whisper_server.py（faster-whisper FastAPI）在本机运行。仅能捕获当前正在播放的音频窗口（约 2 分钟）。DRM / 加密流无法捕获。",
-      whisperCheck: "检查连接",
-      whisperChecking: "检查中…",
-      whisperGuideLink: "打开安装指南",
-      whisperConnected: ({ model, ms }) =>
-        model
-          ? `已连接。当前模型：${model}，响应 ${ms} 毫秒。`
-          : `已连接。模型会在第一次转录时加载，响应 ${ms} 毫秒。`,
-      whisperUnreachable:
-        "连不上。请先运行 whisper/whisper_server.py，再点一次检查。",
-      whisperTimeout:
-        "超时没有响应。服务可能正在加载模型，或端口被其他程序占用。",
-      whisperHttpError: ({ status, url }) =>
-        `${url} 返回 HTTP ${status}，这个地址很可能不是 whisper_server.py。`,
-      whisperUnexpected: ({ url }) =>
-        `${url} 有响应，但不像 Whisper 服务。请核对地址和端口。`,
-      whisperProbeFailed: "检查失败，请重试。",
+        "密钥仅保存在当前 Chrome 个人资料中，只会发送给 DeepSeek。本开源扩展没有开发者服务器，也不使用分析服务。",
       aiProvider: "AI 服务",
       providerSummaryLabel: "支持的 AI 服务",
       providerBadge: "当前版本支持",
@@ -381,11 +336,6 @@ const YTD_OPTIONS = (() => {
     );
     const form = doc.getElementById("settingsForm");
     const aiApiKeyInput = doc.getElementById("aiApiKey");
-    const whisperEnabledInput = doc.getElementById("whisperEnabled");
-    const whisperServerUrlInput = doc.getElementById("whisperServerUrl");
-    const whisperModelInput = doc.getElementById("whisperModel");
-    const whisperCheckBtn = doc.getElementById("whisperCheckBtn");
-    const whisperStatus = doc.getElementById("whisperStatus");
     const customizationPrompt = doc.getElementById("customizationPrompt");
     const copyCustomizationPromptBtn = doc.getElementById(
       "copyCustomizationPromptBtn",
@@ -414,67 +364,6 @@ const YTD_OPTIONS = (() => {
       if (!element) return;
       statusStates.delete(element);
       element.textContent = "";
-    }
-
-    /**
-     * 探活结果用「结构化字段 + 翻译键」渲染，而不是直接把后台返回的中文提示
-     * 塞进来，这样切换界面语言时这段状态也会跟着变。
-     */
-    function setWhisperStatus(key, params = {}, tone = "") {
-      if (!whisperStatus) return;
-      whisperStatus.classList.toggle("is-ok", tone === "ok");
-      whisperStatus.classList.toggle("is-bad", tone === "bad");
-      setStatus(whisperStatus, key, params);
-    }
-
-    async function checkWhisperConnection() {
-      if (!whisperStatus || !whisperCheckBtn) return;
-      const api = root.chrome?.runtime;
-      if (!api?.sendMessage) {
-        setWhisperStatus("whisperProbeFailed", {}, "bad");
-        return;
-      }
-
-      setWhisperStatus("whisperChecking");
-      whisperCheckBtn.disabled = true;
-      try {
-        const result = await api.sendMessage({
-          action: "whisperHealth",
-          // 允许先改地址再检查，不必先保存。
-          url: whisperServerUrlInput ? whisperServerUrlInput.value : "",
-        });
-        if (!result) {
-          setWhisperStatus("whisperProbeFailed", {}, "bad");
-          return;
-        }
-        if (result.ok) {
-          setWhisperStatus(
-            "whisperConnected",
-            { model: result.model, ms: result.elapsedMs },
-            "ok",
-          );
-          return;
-        }
-        if (result.status === "unreachable") {
-          setWhisperStatus("whisperUnreachable", {}, "bad");
-        } else if (result.status === "timeout") {
-          setWhisperStatus("whisperTimeout", {}, "bad");
-        } else if (result.status === "http-error") {
-          setWhisperStatus(
-            "whisperHttpError",
-            { status: result.httpStatus, url: result.url },
-            "bad",
-          );
-        } else if (result.status === "unexpected") {
-          setWhisperStatus("whisperUnexpected", { url: result.url }, "bad");
-        } else {
-          setWhisperStatus("whisperProbeFailed", {}, "bad");
-        }
-      } catch (_error) {
-        setWhisperStatus("whisperProbeFailed", {}, "bad");
-      } finally {
-        whisperCheckBtn.disabled = false;
-      }
     }
 
     function applyLanguage(language) {
@@ -524,15 +413,6 @@ const YTD_OPTIONS = (() => {
         const settings = migration.settings;
 
         aiApiKeyInput.value = settings.aiApiKey;
-        if (whisperEnabledInput) {
-          whisperEnabledInput.checked = !!settings.whisperEnabled;
-        }
-        if (whisperServerUrlInput) {
-          whisperServerUrlInput.value = settings.whisperServerUrl;
-        }
-        if (whisperModelInput) {
-          whisperModelInput.value = settings.whisperModel;
-        }
         if (migration.migrated) {
           await storage.set({ [settingsApi.STORAGE_KEY]: settings });
           setStatus(saveStatus, "migrationWarning");
@@ -557,15 +437,6 @@ const YTD_OPTIONS = (() => {
 
       const settings = settingsApi.normalize({
         aiApiKey: aiApiKeyInput.value,
-        whisperEnabled: whisperEnabledInput
-          ? whisperEnabledInput.checked
-          : false,
-        whisperServerUrl: whisperServerUrlInput
-          ? whisperServerUrlInput.value
-          : settingsApi.DEFAULTS.whisperServerUrl,
-        whisperModel: whisperModelInput
-          ? whisperModelInput.value
-          : settingsApi.DEFAULTS.whisperModel,
       });
 
       if (!settings.aiApiKey) {
@@ -628,12 +499,6 @@ const YTD_OPTIONS = (() => {
       .addEventListener("click", clearCachedDigests);
     doc.getElementById("clearNotesBtn").addEventListener("click", clearNotes);
     doc.getElementById("resetBtn").addEventListener("click", resetAllData);
-    whisperCheckBtn?.addEventListener("click", checkWhisperConnection);
-    whisperServerUrlInput?.addEventListener("input", () => {
-      // 地址改了之后旧结论就不成立了，先清掉，避免误以为新地址也可用。
-      clearStatus(whisperStatus);
-      whisperStatus?.classList.remove("is-ok", "is-bad");
-    });
     for (const button of languageButtons) {
       button.addEventListener("click", async () => {
         const language = button.dataset.language;

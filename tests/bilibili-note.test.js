@@ -96,10 +96,8 @@ test("a note without a digest cache reads the platform captions instead", () => 
   // Notes now come from a page overlay, not only from the side panel, so the
   // digest cache cannot be a hard requirement anymore.
   assert.match(save, /meta\.tabId/);
-  assert.match(save, /handleFetchTranscriptSmart\(videoId, meta\.tabId, \{/);
-  assert.match(save, /platformOnly: true/);
-  // Whisper must be skipped here: recording audio for a single line would
-  // leave the Note button stuck on SAVING for tens of seconds.
+  assert.match(save, /handleFetchTranscriptSmart\(videoId, meta\.tabId\)/);
+  // 只有平台字幕，不会再为了定位一句去录几十秒音频。
   const smart = sliceFunction(source, "handleFetchTranscriptSmart");
-  assert.match(smart, /!options\.platformOnly/);
+  assert.doesNotMatch(smart, /captureAudio|whisper/i);
 });
