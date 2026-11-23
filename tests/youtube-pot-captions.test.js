@@ -81,7 +81,7 @@ test("json3 captions are parsed with their timeline", () => {
 test("stale digests from older caption logic are dropped", () => {
   const sidepanel = read("sidepanel.js");
 
-  assert.match(sidepanel, /const DIGEST_CACHE_VERSION = 2;/);
+  assert.match(sidepanel, /const DIGEST_CACHE_VERSION = 3;/);
   assert.match(sidepanel, /version: DIGEST_CACHE_VERSION,/);
   assert.match(
     sidepanel,

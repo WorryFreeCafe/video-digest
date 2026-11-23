@@ -32,7 +32,8 @@ let isAnalysisLoading = false; // Track if analysis is in progress
  * v2 修好了 YouTube 字幕"空 200"导致的残缺转录（只剩几十秒），
  * 旧缓存必须失效，否则用户会一直看到修复前的短字幕。
  */
-const DIGEST_CACHE_VERSION = 2;
+// v3 起不再有 30 秒音频转录，旧缓存里的那种"只有开头一段"的结果必须作废。
+const DIGEST_CACHE_VERSION = 3;
 
 let youtubeTabId = null; // Store the YouTube tab ID for reliable messaging
 let errorAction = null;
